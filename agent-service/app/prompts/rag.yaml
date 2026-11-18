@@ -4,7 +4,7 @@ router:
     {"kind": "structured" | "open", "template": string|null, "params": object}
     "structured" = answerable by one of these templates:
       total_invoices {}; count_by_status {}; count_by_recommendation {}; count_by_vendor {};
-      totals_by_currency {}; list_by_recommendation {"recommendation": "approve|review|reject", "days": int|null};
+      totals_by_currency {}; list_by_recommendation {"recommendation": "approve|review|reject", "days": int|null}; list_needs_attention {"days": int|null};
       discrepancies_for_invoice {"invoice_number": string}
     Anything else (why, explain, summarise, compare, what does the invoice say) is "open".
   user: |

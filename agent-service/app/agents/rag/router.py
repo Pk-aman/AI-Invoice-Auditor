@@ -33,6 +33,11 @@ TEMPLATES: dict[str, tuple[str, tuple[str, ...]]] = {
         " FROM audit.invoice_audit WHERE recommendation = %s"
         " AND processed_at >= now() - make_interval(days => %s) ORDER BY processed_at DESC LIMIT 50",
         ("recommendation", "days")),
+    "list_needs_attention": (
+        "SELECT invoice_number, vendor_name, total_amount, currency, recommendation, processed_at"
+        " FROM audit.invoice_audit WHERE recommendation IN ('review','reject')"
+        " AND processed_at >= now() - make_interval(days => %s) ORDER BY processed_at DESC LIMIT 50",
+        ("days",)),
     "discrepancies_for_invoice": (
         "SELECT i.invoice_number, d.field_name, d.invoice_value, d.erp_value, d.deviation_pct, d.severity, d.validation_run"
         " FROM audit.discrepancies d JOIN audit.invoice_audit i USING (invoice_id)"
@@ -76,6 +81,8 @@ def keyword_route(question: str, invoice_scope: str | None = None) -> RoutePlan 
         if "recommend" in q:
             return RoutePlan("structured", "count_by_recommendation")
         return RoutePlan("structured", "total_invoices")
+    if re.search(r"need(?:s)? (?:my )?attention|require(?:s)? attention|flagged invoices", q):
+        return RoutePlan("structured", "list_needs_attention", {"days": _days(q)})
     if re.search(r"(?:total|sum|amount).*(?:currency|currencies)|by currency", q):
         return RoutePlan("structured", "totals_by_currency")
     if re.search(r"(?:per|by|each)\s+vendor", q) and re.search(r"invoices|count|how many", q):

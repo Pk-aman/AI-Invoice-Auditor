@@ -1,5 +1,6 @@
 import uuid
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -115,3 +116,47 @@ class UploadStatus(BaseModel):
     state: str | None = None
     error: str | None = None
     updated_at: datetime | None = None
+
+
+class DocumentSummary(BaseModel):
+    document_id: str
+    checksum: str
+    filename: str | None = None
+    file_type: str = ""
+    uploaded_at: datetime
+    processing_status: str  # audited | processing | failed | awaiting
+    audit_result: str  # no_issues | needs_attention | not_available
+    invoice_id: uuid.UUID | None = None
+    invoice_number: str | None = None
+    vendor_name: str | None = None
+    currency: str | None = None
+    total_amount: Decimal | None = None
+    recommendation: str | None = None
+    error: str | None = None
+
+
+class DocumentList(BaseModel):
+    items: list[DocumentSummary]
+    total: int
+    page: int
+    page_size: int
+
+
+class DocumentStats(BaseModel):
+    total: int
+    processing: int
+    audited: int
+    needs_attention: int
+    awaiting: int
+    failed: int
+
+
+class Finding(BaseModel):
+    severity: str
+    message: str
+
+
+class DocumentDetail(DocumentSummary):
+    findings: list[Finding] = []
+    reasons: list[str] = []
+    summary: str | None = None

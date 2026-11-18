@@ -1,123 +1,105 @@
-"""Page 3: Invoice Assistant (RAG chat)."""
-from __future__ import annotations
+import uuid
 
 import streamlit as st
 
-from app import data, state
-from app import ui_text as T
-from app.api.agent_client import get_agent
-from app.api.http import UiError
-from app.components import chat_message
-from app.config import get_settings
-from app.models import InvoiceFilters, RagEvaluation
+from app import api_client, ui
+from app.api_client import ApiError
+
+SUGGESTIONS = ["Which invoices need attention?", "What issues were detected?", "Summarize my invoices."]
+
+ui.header("WORKSPACE / ASSISTANT", "Your invoice assistant.",
+          "Ask questions about your invoices and their audit findings.")
 
 
-def _evals() -> dict[str, RagEvaluation]:
-    return st.session_state.setdefault("rag_evals", {})
+def _new_chat() -> str:
+    chat_id = uuid.uuid4().hex[:8]
+    st.session_state.chats[chat_id] = {"title": "New chat", "messages": []}
+    st.session_state.current_chat = chat_id
+    return chat_id
 
 
-def _pending_ids(messages: list[dict]) -> list[str]:
-    ev = _evals()
-    return [m["eval_id"] for m in messages
-            if m["role"] == "assistant" and m.get("eval_id")
-            and (ev.get(m["eval_id"]) is None or ev[m["eval_id"]].state.upper() == "PENDING")]
+if "chats" not in st.session_state:
+    st.session_state.chats = {}
+    _new_chat()
+
+top = st.columns([4, 1], vertical_alignment="bottom")
+ids = list(st.session_state.chats)
+current = st.session_state.current_chat
+labels, seen = {}, {}
+for i in ids:  # unique, human-readable labels even if two chats share a title
+    title = st.session_state.chats[i]["title"]
+    seen[title] = seen.get(title, 0) + 1
+    labels[i] = title if seen[title] == 1 else f"{title} ({seen[title]})"
+picked = top[0].selectbox("Chat", list(labels.values()), index=ids.index(current))
+picked_id = next(i for i, label in labels.items() if label == picked)
+if picked_id != current:
+    st.session_state.current_chat = picked_id
+    st.rerun()
+if top[1].button("New chat", icon=":material/add:", use_container_width=True):
+    _new_chat()
+    st.rerun()
+
+chat = st.session_state.chats[st.session_state.current_chat]
 
 
-def _poll_scores() -> None:
-    """Fill in RAGAS scores as they become available, then stop polling."""
-    agent = get_agent()
-    for eid in _pending_ids(st.session_state.get(state.CHAT, [])):
-        try:
-            _evals()[eid] = agent.rag_evaluation(eid)
-        except UiError:
-            _evals()[eid] = RagEvaluation(state="FAILED")
-    if not _pending_ids(st.session_state.get(state.CHAT, [])):
-        st.rerun(scope="app")
+@st.cache_data(ttl=10, show_spinner=False)
+def _audited_invoices() -> list[dict]:
+    data = api_client.list_documents({"processing_status": "audited", "page_size": 100})
+    return [d for d in data["items"] if d.get("invoice_id")]
 
 
-def _scope() -> tuple[str | None, str | None]:
-    scope = st.radio(T.SCOPE_LABEL, [T.SCOPE_ALL, T.SCOPE_INVOICE, T.SCOPE_VENDOR], horizontal=True)
-    try:
-        if scope == T.SCOPE_INVOICE:
-            items = data.invoices(InvoiceFilters(), 1, 100).items
-            if not items:
-                st.caption(T.SCOPE_NO_DATA)
-                return None, None
-            labels = {i.invoice_id: f"{i.invoice_number or '(no number)'} · "
-                                    f"{i.vendor_name or 'unknown vendor'}" for i in items}
-            return st.selectbox(T.SCOPE_PICK_INVOICE, list(labels), format_func=labels.get), None
-        if scope == T.SCOPE_VENDOR:
-            vendors = [v.vendor for v in data.by_vendor()]
-            if not vendors:
-                st.caption(T.SCOPE_NO_DATA)
-                return None, None
-            return None, st.selectbox(T.SCOPE_PICK_VENDOR, vendors)
-    except UiError as err:
-        st.error(err.message)
-    return None, None
+scope_id = None
+try:
+    docs = _audited_invoices()
+except ApiError:
+    docs = []
+if docs:
+    scope = {"All invoices": None}
+    for d in docs:
+        scope[f"{ui.display_name(d)} — {d.get('vendor_name') or 'vendor not extracted'}"] = d["invoice_id"]
+    scope_id = scope[st.selectbox("Ask about", list(scope))]
 
 
-def _ask(question: str, invoice_id: str | None, vendor: str | None) -> None:
-    msgs = st.session_state.setdefault(state.CHAT, [])
-    msgs.append({"role": "user", "content": question})
+def _render(message: dict) -> None:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+        if message.get("sources"):
+            with st.expander("Sources"):
+                for s in message["sources"]:
+                    st.caption(f"{s.get('invoice_number') or s.get('invoice_id') or 'Database'} · "
+                               f"{s.get('source_type', '')}")
+                    if s.get("excerpt"):
+                        st.write(s["excerpt"])
+
+
+for m in chat["messages"]:
+    _render(m)
+
+pending = None
+if not chat["messages"]:
+    st.caption("Ask a question or pick a suggestion below.")
+    cols = st.columns(3)
+    for col, text in zip(cols, SUGGESTIONS):
+        if col.button(text, key=f"sug_{text}", use_container_width=True):
+            pending = text
+
+typed = st.chat_input("Ask about your invoices")
+question = typed or pending
+if question:
+    if chat["title"] == "New chat":
+        chat["title"] = question[:40]
+    chat["messages"].append({"role": "user", "content": question})
     with st.chat_message("user"):
         st.markdown(question)
     with st.chat_message("assistant"):
         try:
-            with st.spinner(T.CHAT_THINKING):
-                ans = get_agent().rag_query(question, invoice_id, vendor, state.chat_session_id())
-        except UiError as err:
-            st.session_state[state.FAILED_QUESTION] = (question, invoice_id, vendor, err.message)
-            msgs.pop()
-            return
-        st.session_state.pop(state.FAILED_QUESTION, None)
-        msg = {"role": "assistant", "content": ans.answer, "route": ans.route,
-               "sources": ans.sources, "eval_id": ans.eval_id}
-        msgs.append(msg)
-        chat_message.render_assistant(msg, None)
-
-
-def render() -> None:
-    st.title(T.ASSIST_TITLE)
-    st.caption(T.ASSIST_INTRO)
-    invoice_id, vendor = _scope()
-
-    top = st.columns([6, 1])
-    top[0].caption(f"**{T.SUGGESTED}**")
-    if top[1].button(T.CHAT_CLEAR, disabled=not st.session_state.get(state.CHAT)):
-        st.session_state[state.CHAT] = []
-        st.session_state["rag_evals"] = {}
-        st.rerun()
-    scols = st.columns(len(T.SUGGESTIONS))
-    for i, q in enumerate(T.SUGGESTIONS):
-        if scols[i].button(q, key=f"sugg_{i}", width="stretch"):
-            st.session_state[state.PENDING_QUESTION] = q
-
-    messages = st.session_state.setdefault(state.CHAT, [])
-    if not messages:
-        st.caption(T.CHAT_EMPTY)
-
-    def _history() -> None:
-        for m in messages:
-            with st.chat_message(m["role"]):
-                if m["role"] == "user":
-                    st.markdown(m["content"])
-                else:
-                    chat_message.render_assistant(m, _evals().get(m.get("eval_id") or ""))
-
-    # Quality scores arrive later; this fragment re-polls only while some are pending.
-    every = get_settings().poll_upload_s if _pending_ids(messages) else None
-    st.fragment(run_every=every)(lambda: (_poll_scores() if _pending_ids(messages) else None,
-                                          _history()))()
-
-    failed = st.session_state.get(state.FAILED_QUESTION)
-    if failed:
-        st.error(f"{T.CHAT_ERROR} {failed[3]}")
-        if st.button(T.BTN_TRY_AGAIN, key="assist_retry"):
-            _ask(failed[0], failed[1], failed[2])
-            st.rerun()
-
-    prompt = st.chat_input(T.CHAT_PLACEHOLDER) or st.session_state.pop(state.PENDING_QUESTION, None)
-    if prompt:
-        _ask(prompt, invoice_id, vendor)
-        st.rerun()
+            with st.spinner("Thinking…"):
+                reply = api_client.ask(question, st.session_state.current_chat, scope_id)
+            message = {"role": "assistant", "content": reply.get("answer") or "I could not find an answer.",
+                       "sources": reply.get("sources") or []}
+        except ApiError as exc:
+            message = {"role": "assistant",
+                       "content": f"Sorry, I couldn't get an answer just now. {exc} Please try again."}
+        st.markdown(message["content"])
+    chat["messages"].append(message)
+    st.rerun()

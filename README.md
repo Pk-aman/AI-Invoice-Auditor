@@ -8,7 +8,7 @@ Design docs: [Plan.md](Plan.md) (high level) · [agent-service/Plan.md](agent-se
 
 | Compose service | Directory | Host port → container | Role |
 |---|---|---|---|
-| `ai-auditor-app` (alias `streamlit-ui`) | `ai-auditor-app/` | 8501 → 8501 | Streamlit UI: Dashboard · Upload Invoices · Invoice Assistant |
+| `ai-auditor-app` (alias `streamlit-ui`) | `ai-auditor-app/` | 8501 → 8501 | Streamlit UI: Dashboard · Upload Invoice · Invoice Assistant |
 | `ai-auditor-services` (alias `mock-erp`) | `ai-auditor-services/` | 8001 → 8000 | FastAPI: mock ERP + REST API for invoices, uploads, feedback, stats |
 | `agent-service` (alias `agent`) | `agent-service/` | 8000 → 8000 | LangGraph pipeline, OCR, translation, validation, reporting, RAG |
 | `postgres` | `postgres:16.6` | 5432 → 5432 | system of record (`erp`, `audit`, `langgraph` schemas) |
@@ -45,8 +45,8 @@ Set the model lines in `agent-service/.env` to e.g. `LLM_REASONING_MODEL=ollama/
 ## Using it
 
 1. **Upload Invoices** page (or drop a file into `data/incoming/`) — the agent picks it up within a few seconds.
-2. **Dashboard** — KPIs, charts, filters; select an invoice to see line items, discrepancies, what the system read, the report, the timeline, and to **correct a value and re-validate** (corrections are stored as new rows; originals are never overwritten).
-3. **Invoice Assistant** — ask questions in plain language ("Why was this invoice flagged?", "Which invoices were rejected?").
+2. **Dashboard** — invoice counts, search and filters (status, audit result, upload date), and a **View report** dialog per invoice with the audit findings and the original document.
+3. **Invoice Assistant** — chat about your invoices in plain language ("Which invoices need attention?"); optionally scope a question to one invoice.
 
 Demo files: `INV_EN_002_price_drift.docx` → **review** (one unit price 20% above the ERP); `INV_ES_003_spanish.docx` → translated and **approved**. ERP master data is loaded automatically from `infra/postgres/init/02_erp_schema.sql`; validation rules are in `config/rules.yaml`. Two ready-made demo invoices (a price mismatch and a Spanish one) are in `data/samples/`.
 

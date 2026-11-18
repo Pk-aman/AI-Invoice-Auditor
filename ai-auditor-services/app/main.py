@@ -10,7 +10,7 @@ from app.core.config import get_settings
 from app.core.db import wait_for_db_or_exit
 from app.core.errors import install_error_handlers
 from app.core.logging import setup_logging
-from app.routers import erp, health, invoices, stats, uploads
+from app.routers import documents, erp, health, invoices, stats, uploads
 
 log = logging.getLogger("app")
 
@@ -45,7 +45,7 @@ def create_app() -> FastAPI:
                 "status": response.status_code, "duration_ms": round((time.perf_counter() - start) * 1000, 1)})
         return response
 
-    for r in (health.router, erp.router, uploads.router, invoices.router, stats.router):
+    for r in (health.router, erp.router, uploads.router, documents.router, invoices.router, stats.router):
         app.include_router(r)
     return app
 

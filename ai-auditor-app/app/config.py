@@ -1,23 +1,24 @@
-"""Environment-driven settings. Backends are addressed by docker service name, never localhost."""
-from functools import lru_cache
+"""Backend locations come from the environment (or Streamlit secrets); nothing is hard-coded."""
+import os
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
-
-
-class Settings(BaseSettings):
-    model_config = SettingsConfigDict(extra="ignore")
-
-    services_url: str = "http://ai-auditor-services:8000"
-    agent_url: str = "http://agent-service:8000"
-    log_level: str = "INFO"
-    max_upload_mb: int = 15
-    poll_upload_s: int = 3
-    poll_dash_s: int = 10
-    connect_timeout_s: float = 3.0
-    services_timeout_s: float = 15.0
-    agent_timeout_s: float = 120.0
+import streamlit as st
 
 
-@lru_cache
-def get_settings() -> Settings:
-    return Settings()
+def _get(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        try:
+            value = st.secrets.get(name)
+        except Exception:  # no secrets file
+            value = None
+    if not value:
+        raise RuntimeError(f"{name} is not set. Define it in the environment or .streamlit/secrets.toml.")
+    return value.rstrip("/")
+
+
+SERVICES_URL = _get("SERVICES_URL")
+AGENT_URL = _get("AGENT_URL")
+
+PAGE_SIZE = 8
+MAX_FILE_BYTES = 10 * 1024 * 1024
+ALLOWED_EXTENSIONS = ["pdf", "docx", "png", "jpg", "jpeg"]

@@ -1,129 +1,104 @@
-"""Page 2: Upload Invoices with live progress and duplicate handling."""
-from __future__ import annotations
-
-import mimetypes
-
 import streamlit as st
 
-from app import state
-from app import ui_text as T
-from app.api.http import UiError
-from app.api.services_client import get_services
-from app.config import get_settings
+from app import api_client, ui
+from app.api_client import ApiError
+from app.config import ALLOWED_EXTENSIONS, MAX_FILE_BYTES
 
-ALLOWED = ["pdf", "docx", "png", "jpg", "jpeg", "tif", "tiff"]
-IMAGE_EXT = {"png", "jpg", "jpeg", "tif", "tiff"}
-
-
-def _ext(name: str) -> str:
-    return name.rsplit(".", 1)[-1].lower() if "." in name else ""
-
-
-def _stage(status: str) -> tuple[str, str, int]:
-    return T.UPLOAD_STAGES.get(status.upper(), (status.title(), "•", 0))
+SIGNATURES = {
+    "pdf": (b"%PDF-",),
+    "docx": (b"PK\x03\x04",),
+    "png": (b"\x89PNG\r\n\x1a\n",),
+    "jpg": (b"\xff\xd8\xff",),
+    "jpeg": (b"\xff\xd8\xff",),
+}
+MIME = {"pdf": "application/pdf", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
 
 
-def _batch() -> list[dict]:
-    return st.session_state.setdefault(state.UPLOAD_BATCH, [])
+def validate(name: str, data: bytes) -> str | None:
+    """Returns an error message, or None if the file is acceptable."""
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    if len(data) == 0:
+        return "The file is empty."
+    if len(data) > MAX_FILE_BYTES:
+        return "The file is larger than 10 MB."
+    if ext not in SIGNATURES:
+        return "Unsupported file type. Use PDF, DOCX, PNG, JPG or JPEG."
+    if not data.startswith(SIGNATURES[ext]):
+        return f"The content does not look like a real .{ext} file."
+    return None
 
 
-def _active() -> bool:
-    return any(r["status"].upper() not in T.UPLOAD_TERMINAL for r in _batch())
+ui.header("WORKSPACE / UPLOAD", "Every audit starts here.",
+          "Add your invoices in one place. Keep your documents and their status together.")
+st.info("Your files are saved on the server and picked up by the audit agent within seconds. It reads each "
+        "document (using OCR for scans), translates it to English if needed, checks it against the ERP, and "
+        "writes a report. Follow progress on the Dashboard.")
 
+left, right = st.columns([2.2, 1], gap="large")
 
-def _poll_once() -> None:
-    svc = get_services()
-    for row in _batch():
-        if row["status"].upper() in T.UPLOAD_TERMINAL or not row.get("checksum"):
-            continue
-        try:
-            s = svc.upload_status(row["checksum"])
-        except UiError as err:
-            row["note"] = err.message
-            continue
-        row["status"] = s.status
-        row["invoice_id"] = s.invoice_id or row.get("invoice_id")
-        if s.error:
-            row["note"] = s.error
+with left:
+    with st.container(border=True):
+        st.subheader("Upload invoices")
+        st.caption("PDF, DOCX, PNG, JPG, JPEG / Up to 10 MB per file")
+        files = st.file_uploader("Choose invoices", type=ALLOWED_EXTENSIONS, accept_multiple_files=True,
+                                 key=f"uploader_{st.session_state.get('uploader_gen', 0)}")
+        st.caption("Remove a selected file using its X control before submitting.")
+        submit = st.button("Add to workspace", type="primary", icon=":material/upload:",
+                           use_container_width=True, disabled=not files)
 
+    if submit and files:
+        valid, errors = [], []
+        for f in files:
+            data = f.getvalue()
+            problem = validate(f.name, data)
+            if problem:
+                errors.append((f.name, problem))
+            else:
+                valid.append((f.name, data, MIME[f.name.rsplit(".", 1)[-1].lower()]))
+        for name, problem in errors:
+            st.error(f"**{name}** was not uploaded. {problem}")
+        if valid:
+            try:
+                with st.spinner(f"Uploading {len(valid)} file(s)…"):
+                    results = api_client.upload(valid)
+            except ApiError as exc:
+                st.error(f"Upload failed. {exc}")
+            else:
+                for r in results:
+                    status = r["status"]
+                    if status == "QUEUED":
+                        st.success(f"**{r['filename']}** was added. It will appear on the Dashboard while it is processed.")
+                    elif status == "DUPLICATE":
+                        st.info(f"**{r['filename']}** is already in your workspace, so it was not added again.")
+                    else:
+                        st.error(f"**{r['filename']}** was rejected. {r.get('reason') or 'The file could not be accepted.'}")
+                st.cache_data.clear()
+                if any(r["status"] == "QUEUED" for r in results) and not errors:
+                    st.session_state["uploader_gen"] = st.session_state.get("uploader_gen", 0) + 1
+                    st.session_state["upload_notice"] = [r for r in results]
+                    st.rerun()
 
-def _progress_table() -> None:
-    batch = _batch()
-    if not batch:
-        st.caption(T.UPLOAD_PROGRESS_EMPTY)
-        return
-    if _active():
-        _poll_once()
-        if not _active():
-            st.rerun(scope="app")  # stop the timer once everything is finished
-    for i, row in enumerate(batch):
-        label, icon, order = _stage(row["status"])
-        c = st.columns([3, 3, 4, 2])
-        c[0].markdown(f"**{row['name']}**")
-        c[1].markdown(f"{icon} {label}")
-        terminal = row["status"].upper() in T.UPLOAD_TERMINAL
-        c[2].progress(min(order / T.UPLOAD_STAGE_MAX, 1.0),
-                      text=row.get("note") or (T.UPLOAD_DUP if row["status"].upper() == "DUPLICATE"
-                                               else label))
-        done = terminal and row.get("invoice_id") and row["status"].upper() in {"COMPLETED", "DUPLICATE"}
-        if done and c[3].button(T.UPLOAD_VIEW, key=f"view_{i}_{row['invoice_id']}"):
-            from app.nav import dashboard_page
-            state.open_invoice(row["invoice_id"])
-            st.switch_page(dashboard_page())
-    if not _active():
-        st.success(T.UPLOAD_DONE_ALL)
+    notice = st.session_state.pop("upload_notice", None)
+    if notice:
+        for r in notice:
+            if r["status"] == "QUEUED":
+                st.success(f"**{r['filename']}** was added. It will appear on the Dashboard while it is processed.")
+            elif r["status"] == "DUPLICATE":
+                st.info(f"**{r['filename']}** is already in your workspace, so it was not added again.")
+            else:
+                st.error(f"**{r['filename']}** was rejected. {r.get('reason') or ''}")
+        st.page_link("pages/dashboard.py", label="Go to Dashboard", icon=":material/dashboard:")
 
-
-def render() -> None:
-    s = get_settings()
-    st.title(T.UPLOAD_TITLE)
-    st.caption(T.UPLOAD_INTRO)
-    files = st.file_uploader(T.UPLOAD_LABEL, type=ALLOWED, accept_multiple_files=True,
-                             help=T.UPLOAD_HELP.format(mb=s.max_upload_mb))
-    st.caption(T.UPLOAD_HELP.format(mb=s.max_upload_mb))
-
-    valid = []
-    for f in files or []:
-        size_mb = f.size / (1024 * 1024)
-        if _ext(f.name) not in ALLOWED:
-            st.warning(T.UPLOAD_BAD_TYPE.format(name=f.name))
-        elif size_mb > s.max_upload_mb:
-            st.warning(T.UPLOAD_TOO_BIG.format(name=f.name, size=size_mb, mb=s.max_upload_mb))
-        else:
-            valid.append(f)
-
-    if valid:
-        st.subheader(T.UPLOAD_PREVIEW)
-        cols = st.columns(min(len(valid), 4))
-        for i, f in enumerate(valid):
-            with cols[i % len(cols)]:
-                if _ext(f.name) in IMAGE_EXT and _ext(f.name) not in {"tif", "tiff"}:
-                    st.image(f, caption=f"{f.name} ({f.size / 1024:.0f} KB)", width="stretch")
-                else:
-                    note = T.UPLOAD_PDF_NOTE if _ext(f.name) == "pdf" else T.UPLOAD_DOC_NOTE
-                    st.markdown(f"📄 **{f.name}**  \n{f.size / 1024:.0f} KB · {note}")
-    elif files:
-        st.error(T.UPLOAD_NONE_VALID)
-
-    if st.button(T.UPLOAD_SUBMIT, type="primary", disabled=not valid):
-        payload = [(f.name, f.getvalue(), f.type or mimetypes.guess_type(f.name)[0]
-                    or "application/octet-stream") for f in valid]
-        try:
-            with st.spinner("Sending…"):
-                results = get_services().upload(payload)
-        except UiError as err:
-            st.error(err.message)
-        else:
-            for r in results:
-                _batch().append({"name": r.filename, "checksum": r.checksum, "status": r.status,
-                                 "invoice_id": r.invoice_id, "note": r.detail})
-            st.toast(T.UPLOAD_SENT.format(n=len(results)), icon="📤")
-
-    st.divider()
-    head, clear = st.columns([5, 1])
-    head.subheader(T.UPLOAD_PROGRESS)
-    if clear.button(T.UPLOAD_CLEAR, disabled=not _batch()):
-        st.session_state[state.UPLOAD_BATCH] = []
-        st.rerun()
-    every = s.poll_upload_s if _active() else None
-    st.fragment(run_every=every)(_progress_table)()
+with right:
+    with st.container(border=True):
+        st.subheader("A cleaner invoice, a better review")
+        st.markdown("**01 / Keep it readable**")
+        st.caption("Use clear scans with the full document visible.")
+        st.markdown("**02 / One invoice per file**")
+        st.caption("Keep multi-page invoices together in a single PDF.")
+        st.markdown("**03 / Follow its status**")
+        st.caption("Open the Dashboard to find your document and its report.")
+        st.divider()
+        st.caption("What happens next")
+        st.caption("Upload → Queue → Extract → Audit → Report ready")

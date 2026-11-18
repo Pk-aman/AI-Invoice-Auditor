@@ -1,21 +1,33 @@
-"""Entry point: streamlit run app/main.py"""
-import logging
-import sys
-from pathlib import Path
+import streamlit as st
 
-ROOT = str(Path(__file__).resolve().parents[1])
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
+from app import api_client, ui
 
-import streamlit as st  # noqa: E402
+st.set_page_config(page_title="Invoice Monitor", page_icon=":material/receipt_long:", layout="wide")
+ui.apply_theme()
 
-from app import ui_text as T  # noqa: E402
-from app.config import get_settings  # noqa: E402
-from app.nav import pages  # noqa: E402
+dashboard = st.Page("pages/dashboard.py", title="Dashboard", icon=":material/dashboard:", default=True)
+upload = st.Page("pages/upload.py", title="Upload Invoice", icon=":material/upload_file:", url_path="upload")
+assistant = st.Page("pages/assistant.py", title="Invoice Assistant", icon=":material/chat:", url_path="assistant")
+nav = st.navigation([dashboard, upload, assistant], position="hidden")
 
-logging.basicConfig(level=get_settings().log_level, format="%(asctime)s %(levelname)s %(name)s %(message)s",
-                    stream=sys.stdout)
+try:
+    total = api_client.document_stats()["total"]
+    connected = True
+except api_client.ApiError:
+    total, connected = None, False
 
-st.set_page_config(page_title=T.APP_TITLE, page_icon="🧾", layout="wide")
-st.sidebar.title(f"🧾 {T.APP_TITLE}")
-st.navigation(list(pages().values())).run()
+with st.sidebar:
+    st.markdown("### :material/receipt_long: Invoice Monitor")
+    st.caption("Clarity in every invoice.")
+    st.page_link(dashboard, label="Dashboard", icon=":material/dashboard:")
+    st.page_link(upload, label="Upload Invoice", icon=":material/upload_file:")
+    st.page_link(assistant, label="Invoice Assistant", icon=":material/chat:")
+    st.divider()
+    if connected:
+        st.markdown(f"**{total}** invoice(s) in workspace")
+        st.caption("Connected to the audit backend.")
+    else:
+        st.markdown("**–** invoice(s) in workspace")
+        st.caption("Audit backend unavailable. Showing no data until it reconnects.")
+
+nav.run()
