@@ -48,7 +48,7 @@ Set the model lines in `agent-service/.env` to e.g. `LLM_REASONING_MODEL=ollama/
 2. **Dashboard** — KPIs, charts, filters; select an invoice to see line items, discrepancies, what the system read, the report, the timeline, and to **correct a value and re-validate** (corrections are stored as new rows; originals are never overwritten).
 3. **Invoice Assistant** — ask questions in plain language ("Why was this invoice flagged?", "Which invoices were rejected?").
 
-Sample data: `Raw Data/data/incoming/INV_EN_001.jpg` is a real Vietnamese freight debit note whose vendor is not in the ERP and whose currency (VND) is not accepted, so the expected outcome is **reject**. ERP master data is in `Raw Data/data/ERP_mockdata/`; validation rules are in `config/rules.yaml`.
+Demo files: `INV_EN_002_price_drift.docx` → **review** (one unit price 20% above the ERP); `INV_ES_003_spanish.docx` → translated and **approved**. ERP master data is loaded automatically from `infra/postgres/init/02_erp_schema.sql`; validation rules are in `config/rules.yaml`. Two ready-made demo invoices (a price mismatch and a Spanish one) are in `data/samples/`.
 
 ## Verification checklist (from the brief)
 
@@ -61,7 +61,7 @@ Sample data: `Raw Data/data/incoming/INV_EN_001.jpg` is a real Vietnamese freigh
 | 5 | No secrets in images | `docker history ai-auditor/agent-service:1.0.0 --no-trunc` (repeat for the other two) |
 | 6 | Service-name resolution | `docker compose exec agent-service python -c "import socket;print([socket.gethostbyname(h) for h in ('postgres','qdrant','redis','mock-erp')])"` |
 
-Useful: `docker compose logs -f agent-service` · `make psql` · `make reset` (destroys volumes).
+Useful: `docker compose logs -f agent-service` · `docker compose exec postgres psql -U postgres -d auditor`.
 
 ## Data placement
 
