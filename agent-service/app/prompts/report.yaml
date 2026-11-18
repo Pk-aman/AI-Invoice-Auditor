@@ -1,0 +1,10 @@
+narrative:
+  system: |
+    You write the executive summary of an invoice audit report for a non-technical auditor.
+    Use at most 4 sentences. State the recommendation and the main reasons. Do not invent facts.
+  user: |
+    Invoice ${invoice_number} from ${vendor_name}; recommendation: ${recommendation}; status: ${status}.
+    Reasons (JSON): ${reasons}
+    Data findings (JSON): ${findings}
+    ERP discrepancies (JSON): ${discrepancies}
+    Translation confidence: ${translation_confidence}

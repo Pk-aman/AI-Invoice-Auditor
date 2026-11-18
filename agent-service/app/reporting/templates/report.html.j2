@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Invoice audit report — {{ r.invoice.invoice_number or r.invoice_id }}</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif; margin: 24px auto; max-width: 960px; color: #1f2933; line-height: 1.45; padding: 0 16px; }
+  h1 { font-size: 1.5rem; margin-bottom: 4px; } h2 { font-size: 1.1rem; margin-top: 28px; border-bottom: 1px solid #d9e2ec; padding-bottom: 4px; }
+  .badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-weight: 600; font-size: .85rem; }
+  .approve { background: #def7ec; color: #03543f; } .review { background: #fdf6b2; color: #723b13; } .reject { background: #fde8e8; color: #9b1c1c; }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: .92rem; } th, td { border: 1px solid #d9e2ec; padding: 6px 8px; text-align: left; vertical-align: top; }
+  th { background: #f0f4f8; } .muted { color: #627d98; } .sev-critical, .sev-high { color: #9b1c1c; font-weight: 600; } .sev-medium { color: #b45309; } .sev-low { color: #627d98; }
+  ul { margin: 6px 0 6px 20px; padding: 0; }
+</style>
+</head>
+<body>
+<h1>Invoice audit report</h1>
+<p class="muted">Invoice {{ r.invoice.invoice_number or "(no number)" }} · {{ r.invoice.vendor_name or "(unknown vendor)" }} · validation run {{ r.validation_run }} · generated {{ r.generated_at }}</p>
+<p>Recommendation: <span class="badge {{ r.recommendation }}">{{ r.recommendation_label }}</span>
+   &nbsp; Status: <strong>{{ r.validation_status }}</strong></p>
+
+<h2>Summary</h2>
+<p>{{ r.summary }}</p>
+<ul>{% for reason in r.reasons %}<li>{{ reason }}</li>{% endfor %}</ul>
+
+<h2>Invoice details</h2>
+<table>
+  <tr><th>Invoice no.</th><td>{{ r.invoice.invoice_number or "—" }}</td><th>Date</th><td>{{ r.invoice.invoice_date or "—" }}</td></tr>
+  <tr><th>Vendor</th><td>{{ r.invoice.vendor_name or "—" }}{% if r.vendor_id %} ({{ r.vendor_id }}){% endif %}</td><th>PO number</th><td>{{ r.po_number or "—" }}{% if r.po_inferred %} <span class="muted">(inferred)</span>{% endif %}</td></tr>
+  <tr><th>Currency</th><td>{{ r.invoice.currency or "—" }}</td><th>Total</th><td>{{ r.invoice.total_amount or "—" }}</td></tr>
+  <tr><th>Source language</th><td>{{ r.source_language or "—" }}</td><th>Translation confidence</th><td>{{ r.translation_confidence if r.translation_confidence is not none else "—" }}</td></tr>
+</table>
+
+<h2>Line items</h2>
+<table>
+  <tr><th>#</th><th>Item code</th><th>Description</th><th>Qty</th><th>Unit price</th><th>Line total</th></tr>
+  {% for li in r.invoice.line_items %}
+  <tr><td>{{ li.line_number }}</td><td>{{ li.item_code or "—" }}</td><td>{{ li.description or "—" }}</td><td>{{ li.quantity if li.quantity is not none else "—" }}</td><td>{{ li.unit_price if li.unit_price is not none else "—" }}</td><td>{{ li.line_total if li.line_total is not none else "—" }}</td></tr>
+  {% else %}<tr><td colspan="6" class="muted">No line items were extracted.</td></tr>{% endfor %}
+</table>
+
+<h2>Discrepancies against the ERP</h2>
+{% if r.discrepancies %}
+<table>
+  <tr><th>Field</th><th>Invoice value</th><th>ERP value</th><th>Deviation %</th><th>Severity</th></tr>
+  {% for d in r.discrepancies %}
+  <tr><td>{{ d.field_name }}</td><td>{{ d.invoice_value if d.invoice_value is not none else "—" }}</td><td>{{ d.erp_value if d.erp_value is not none else "—" }}</td><td>{{ d.deviation_pct if d.deviation_pct is not none else "—" }}</td><td class="sev-{{ d.severity }}">{{ d.severity }}</td></tr>
+  {% endfor %}
+</table>
+{% else %}<p class="muted">No discrepancies beyond the configured tolerance.</p>{% endif %}
+
+<h2>Data checks</h2>
+{% if r.data_findings %}
+<ul>{% for f in r.data_findings %}<li><span class="sev-{{ f.severity }}">[{{ f.severity }}]</span> {{ f.message }}</li>{% endfor %}</ul>
+{% else %}<p class="muted">All required fields are present and the amounts are consistent.</p>{% endif %}
+{% if r.missing_fields %}<p>Missing fields: <strong>{{ r.missing_fields | join(", ") }}</strong></p>{% endif %}
+
+{% if r.corrections %}
+<h2>Human corrections applied in this run</h2>
+<table><tr><th>Field</th><th>Corrected value</th></tr>
+{% for k, v in r.corrections.items() %}<tr><td>{{ k }}</td><td>{{ v }}</td></tr>{% endfor %}</table>
+{% endif %}
+
+{% if r.notes %}<h2>Notes</h2><ul>{% for n in r.notes %}<li>{{ n }}</li>{% endfor %}</ul>{% endif %}
+</body>
+</html>

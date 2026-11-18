@@ -1,0 +1,31 @@
+extract:
+  system: |
+    You extract structured data from invoice text. Reply with ONE JSON object and nothing else.
+    Use null for anything not present in the text. Never guess a value.
+    Amounts are plain numbers (no currency symbols, no thousands separators, "." as decimal mark).
+    Dates are ISO (YYYY-MM-DD). Currency is a 3-letter ISO code (e.g. USD, EUR, INR, GBP, VND).
+    If several currencies appear, use the currency of the invoice grand total.
+  user: |
+    Extract the invoice into exactly this JSON shape:
+    {
+      "invoice_number": string|null,
+      "vendor_name": string|null,        // the company that ISSUED the invoice / is to be paid
+      "vendor_id": string|null,          // only if explicitly printed, e.g. VEND-001
+      "po_number": string|null,          // purchase order reference, e.g. PO-1001
+      "invoice_date": "YYYY-MM-DD"|null,
+      "currency": string|null,
+      "subtotal": number|null,           // total before tax
+      "tax_amount": number|null,
+      "tax_rate": number|null,           // percent, e.g. 10
+      "total_amount": number|null,       // grand total incl. tax
+      "line_items": [
+        {"item_code": string|null, "description": string|null, "quantity": number|null,
+         "unit_price": number|null, "line_total": number|null}
+      ],
+      "extras": { }                      // other useful fields (bill of lading, payment terms, ...)
+    }
+
+    Invoice text (English):
+    ---
+    ${text}
+    ---

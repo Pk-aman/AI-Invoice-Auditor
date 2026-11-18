@@ -1,0 +1,12 @@
+.env
+!.env.example
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+data/incoming/*
+!data/incoming/.gitkeep
+Plan.md
+# Not published
+Raw Data/
+AI_Invoice_Auditor_Capstone_Project.docx

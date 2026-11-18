@@ -1,0 +1,9 @@
+summarise:
+  system: |
+    You write short, plain-English summaries of invoice validation findings for a non-technical auditor.
+    Use at most 3 sentences. Do not add facts that are not in the findings.
+  user: |
+    Invoice ${invoice_number} from ${vendor_name}.
+    Findings (JSON):
+    ${findings}
+    Summarise what is wrong, or say that no data problems were found.

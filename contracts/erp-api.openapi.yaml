@@ -1,0 +1,101 @@
+openapi: 3.0.3
+info:
+  title: Mock ERP API (ai-auditor-services)
+  version: 1.0.0
+  description: >
+    Contract between agent-service (consumer) and ai-auditor-services (provider).
+    The first three paths are fixed by the project brief. The agent must obtain ERP
+    data ONLY through this API, never by querying the erp schema directly.
+servers:
+  - url: http://mock-erp:8000   # inside the docker network: container port 8000, not host port 8001
+paths:
+  /po/{po_number}:
+    get:
+      summary: PO header and line items
+      parameters:
+        - {name: po_number, in: path, required: true, schema: {type: string}, example: PO-1001}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/PurchaseOrder"}}}}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /vendor/{vendor_id}:
+    get:
+      summary: Vendor master record
+      parameters:
+        - {name: vendor_id, in: path, required: true, schema: {type: string}, example: VEND-001}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Vendor"}}}}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /sku/{sku_code}:
+    get:
+      summary: SKU master record
+      parameters:
+        - {name: sku_code, in: path, required: true, schema: {type: string}, example: SKU-001}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {$ref: "#/components/schemas/Sku"}}}}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /api/v1/erp/vendors/search:
+    get:
+      summary: Fuzzy vendor lookup by name (invoices carry names, not ids)
+      parameters:
+        - {name: name, in: query, required: true, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, default: 5, maximum: 20}}
+      responses:
+        "200":
+          description: ranked matches (empty list when nothing is similar)
+          content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/VendorMatch"}}}}
+  /api/v1/erp/pos:
+    get:
+      summary: POs for a vendor (used to infer the PO when the invoice has none)
+      parameters:
+        - {name: vendor_id, in: query, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/PurchaseOrder"}}}}}
+components:
+  responses:
+    NotFound:
+      description: unknown id. A normal business answer, not a failure (5xx means failure).
+      content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}
+  schemas:
+    Vendor:
+      type: object
+      required: [vendor_id, vendor_name, currency]
+      properties:
+        vendor_id: {type: string}
+        vendor_name: {type: string}
+        country: {type: string, nullable: true}
+        currency: {type: string, minLength: 3, maxLength: 3}
+    VendorMatch:
+      allOf:
+        - {$ref: "#/components/schemas/Vendor"}
+        - {type: object, properties: {score: {type: number, minimum: 0, maximum: 1}}}
+    PoLine:
+      type: object
+      required: [line_number, item_code, qty, unit_price, currency]
+      properties:
+        line_number: {type: integer}
+        item_code: {type: string}
+        description: {type: string, nullable: true}
+        qty: {type: number}
+        unit_price: {type: number}
+        currency: {type: string}
+    PurchaseOrder:
+      type: object
+      required: [po_number, vendor_id, line_items]
+      properties:
+        po_number: {type: string}
+        vendor_id: {type: string}
+        line_items: {type: array, items: {$ref: "#/components/schemas/PoLine"}}
+    Sku:
+      type: object
+      required: [item_code]
+      properties:
+        item_code: {type: string}
+        category: {type: string}
+        uom: {type: string}
+        gst_rate: {type: number}
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties: {code: {type: string}, message: {type: string}}

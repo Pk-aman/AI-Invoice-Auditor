@@ -1,0 +1,123 @@
+# AI Invoice Auditor: 3 app services + postgres, qdrant, redis. Secrets come from .env files (never committed).
+name: ai-auditor
+
+services:
+  postgres:
+    image: postgres:16.6
+    container_name: auditor-postgres
+    env_file: .env
+    environment:
+      # roles' passwords are consumed by infra/postgres/init/01_init_roles_schemas.sh
+      AGENT_DB_PASSWORD: ${AGENT_DB_PASSWORD:?set in .env}
+      SERVICES_DB_PASSWORD: ${SERVICES_DB_PASSWORD:?set in .env}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # healthy only once the init scripts have finished and the seeded ERP data is queryable
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB} && psql -U $${POSTGRES_USER} -d $${POSTGRES_DB} -tAc 'SELECT 1 FROM erp.vendors LIMIT 1' | grep -q 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+    networks: [auditor-net]
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    container_name: auditor-qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+    networks: [auditor-net]
+
+  redis:
+    image: redis:7.4
+    container_name: auditor-redis
+    command: ["redis-server", "--save", "", "--appendonly", "no"]   # disposable cache: no persistence
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    networks: [auditor-net]
+
+  ai-auditor-services:
+    image: ai-auditor/ai-auditor-services:1.0.0
+    build: ./ai-auditor-services
+    container_name: auditor-services
+    env_file: ai-auditor-services/.env
+    ports:
+      - "8001:8000"          # host 8001 -> container 8000 (per brief)
+    volumes:
+      - ./data/incoming:/data/incoming        # uploads land here; agent watches it
+      - reports:/data/reports:ro              # generated reports, written by the agent
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      auditor-net:
+        aliases: [mock-erp]
+
+  agent-service:
+    image: ai-auditor/agent-service:1.0.0
+    build: ./agent-service
+    container_name: auditor-agent
+    env_file: agent-service/.env          # AWS Bedrock keys + DB password live here (never in the image)
+    environment:
+      LLM_PROBE: ${LLM_PROBE:-on}         # LLM_PROBE=off docker compose up ... to start without AWS keys
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data/incoming:/data/incoming:ro # watched folder
+      - reports:/data/reports             # JSON + HTML reports
+      - ./config/rules.yaml:/config/rules.yaml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres: {condition: service_healthy}
+      qdrant: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      ai-auditor-services: {condition: service_healthy}
+    restart: unless-stopped
+    networks:
+      auditor-net:
+        aliases: [agent]
+
+  ai-auditor-app:
+    image: ai-auditor/ai-auditor-app:1.0.0
+    build: ./ai-auditor-app
+    container_name: auditor-app
+    env_file: ai-auditor-app/.env
+    ports:
+      - "8501:8501"
+    depends_on:
+      ai-auditor-services: {condition: service_healthy}
+      agent-service: {condition: service_healthy}
+    restart: unless-stopped
+    networks:
+      auditor-net:
+        aliases: [streamlit-ui]
+
+networks:
+  auditor-net:
+    driver: bridge
+
+volumes:
+  pgdata:
+  qdrant_data:
+  reports:
