@@ -108,3 +108,17 @@ def test_api_error_on_submit_is_shown_not_swallowed(backend, monkeypatch):
     _button(at, "Approve").click().run()
     assert any("already been finalized" in e.value for e in at.error)
     assert REPORT["summary"]
+
+
+def test_pdf_preview_renders_pages_as_images_not_a_data_url_iframe(backend):
+    import pymupdf
+
+    from app import report
+
+    doc = pymupdf.open()
+    for n in range(12):
+        doc.new_page().insert_text((50, 72), f"page {n + 1}")
+    pdf = doc.tobytes()
+    pages, total = report.pdf_pages(pdf)
+    assert total == 12 and len(pages) == report.MAX_PREVIEW_PAGES and all(p.startswith(b"\x89PNG") for p in pages)
+    assert "data:application/pdf" not in __import__("inspect").getsource(report)

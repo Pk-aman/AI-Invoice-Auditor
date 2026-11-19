@@ -1,12 +1,22 @@
 """Contents of the 'Invoice report' dialog: the immutable AI report, the live review state, and the human review form."""
-import base64
-
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
 from app import api_client, review_logic, ui
 from app.api_client import ApiError
+
+
+MAX_PREVIEW_PAGES = 10
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def pdf_pages(data: bytes, dpi: int = 110) -> tuple[list[bytes], int]:
+    """Render PDF pages to PNG with PyMuPDF. Browsers (Chrome) block PDFs embedded from data: URLs, so we show images."""
+    import pymupdf
+
+    with pymupdf.open(stream=data, filetype="pdf") as doc:
+        total = doc.page_count
+        return [doc[i].get_pixmap(dpi=dpi, alpha=False).tobytes("png") for i in range(min(total, MAX_PREVIEW_PAGES))], total
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -27,9 +37,15 @@ def _document_preview(doc: dict, document_id: str) -> None:
     if ext in ("png", "jpg", "jpeg"):
         st.image(data, use_container_width=True)
     elif ext == "pdf":
-        b64 = base64.b64encode(data).decode()
-        components.html(f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="500" '
-                        'style="border:1px solid #E3E9EE;border-radius:10px"></iframe>', height=510)
+        try:
+            pages, total = pdf_pages(data)
+        except Exception:  # noqa: BLE001 - corrupt/encrypted PDF: the download button below still works
+            st.warning("A preview could not be created for this PDF. Use Download original to open it.")
+        else:
+            for n, png in enumerate(pages, start=1):
+                st.image(png, caption=f"Page {n} of {total}", use_container_width=True)
+            if total > len(pages):
+                st.caption(f"Showing the first {len(pages)} of {total} pages. Download the original to see the rest.")
     elif ext == "docx":
         st.info("Inline preview is not available for DOCX files. Use Download original to open it.")
     st.download_button("Download original", data=data, file_name=doc.get("filename") or "invoice",
