@@ -1,96 +1,206 @@
-"""RAG facade: answer a question (Redis-cached), then asynchronously score it with RAGAS.
+# ================================================================
+# AI INVOICE AUDITOR - RAG: INVOKE THE RAG GRAPH
+# ================================================================
 
-Public response (see api/schemas.py::RagAnswer):
-  {invoice_id, answer, cache_hit, ragas_metrics{context_relevance, faithfulness, answer_relevance,
-   low_confidence_warning, state}, sources[{source_type, chunk_text, ...}], route, eval_id}
-
-RAGAS needs several LLM calls, so it never blocks the answer: `ragas_metrics.state` is "pending" (all scores null)
-until the evaluation finishes; poll GET /rag/evaluations/{eval_id}. A cached answer returns the evaluation's
-CURRENT state/scores, never a claim that was not computed.
-"""
-from __future__ import annotations
+# POST /rag/query (app/api/routes.py) -> RagService.query -> ask_invoice_question
+#
+# Public response (see api/schemas.py::RagAnswer):
+#   {invoice_id, answer, cache_hit, ragas_metrics{context_relevance, faithfulness, answer_relevance,
+#    low_confidence_warning, state}, sources[{source_type, chunk_text, ...}], route, eval_id, retry_count}
+#
+# RAGAS runs inside the graph (reflect node), so the scores come back with the answer
+# (state "done", or "failed" with the reason) and are stored in audit.rag_evaluations;
+# GET /rag/evaluations/{eval_id} returns them again.
 
 import logging
-import threading
 
+from app.agents.rag import setup
 from app.core.context import AppContext
-from app.core.observability import record_score, traced_span
 from app.core.rag_cache import RagCache
-from app.graphs.rag_graph import build_rag_graph
-from app.services.ragas_evaluator import RagasEvaluator
+from app.graphs.rag_graph import build_graph
 
 log = logging.getLogger(__name__)
 
+rag_graph = None
+
+# ================================================================
+# STEP 20: INVOKE THE RAG GRAPH
+# ================================================================
+
+def ask_invoice_question(
+    question,
+    invoice_id=None,
+    vendor=None
+):
+
+    initial_state = {
+
+        "question": question,
+
+        "invoice_id": invoice_id,
+
+        "vendor": vendor,
+
+        "query_type": "",
+
+        "sql_action": "",
+
+        "invoice_number": "",
+
+        "note": "",
+
+        "retrieved_docs": [],
+
+        "context": "",
+
+        "context_chunks": [],
+
+        "sources": [],
+
+        "answer": "",
+
+        "scores": {},
+
+        "passed": False,
+
+        "retry_count": 0,
+
+        "evaluation_error": ""
+    }
+
+    # Execute LangGraph.
+
+    result = rag_graph.invoke(initial_state)
+
+    return {
+
+        "question": question,
+
+        "answer": result["answer"],
+
+        "query_type": result["query_type"],
+
+        "note": result["note"],
+
+        "sources": result["sources"],
+
+        "context_chunks": result["context_chunks"],
+
+        "scores": result["scores"],
+
+        "evaluation_passed": result["passed"],
+
+        "retry_count": result["retry_count"],
+
+        "evaluation_error": result["evaluation_error"]
+    }
+
+# ================================================================
+# RAG SERVICE (used by the FastAPI routes)
+# ================================================================
 
 class RagService:
-    def __init__(self, ctx: AppContext, evaluator: RagasEvaluator | None = None):
+
+    def __init__(self, ctx: AppContext):
+
+        global rag_graph
+
         self.ctx = ctx
-        self.graph = build_rag_graph(ctx)
+
+        setup.init(ctx)
+
+        rag_graph = build_graph()
+
         self.cache = RagCache(ctx.redis, ctx.settings.rag_cache_ttl_s)
-        self.evaluator = evaluator or RagasEvaluator(ctx.settings)
 
     # ---- query ----------------------------------------------------------------------------------
+
     def query(self, question: str, invoice_id: str | None = None, vendor: str | None = None) -> dict:
+
+        # Same question for the same invoice -> cached answer (cleared when the invoice is corrected).
+
         cached = self.cache.get(invoice_id, question, vendor)
+
         if cached is not None:
             return self._response(invoice_id, cached, cache_hit=True)
 
-        out = self.graph.invoke({"question": question, "invoice_id": invoice_id, "vendor": vendor})
-        answer, route, sources = out.get("answer", ""), out.get("route", "open"), out.get("sources", [])
-        payload = {"answer": answer, "route": route, "sources": sources, "eval_id": None}
+        result = ask_invoice_question(question, invoice_id, vendor)
 
-        chunks = out.get("context_chunks") or []
-        if route == "open" and chunks:  # SQL answers change with every new invoice: never cached
+        route = "structured" if result["query_type"] == "sql" else "open"
+
+        answer = result["answer"]
+
+        if result["note"]:
+            answer = f"{result['note']}\n\n{answer}"
+
+        payload = {"answer": answer, "route": route, "sources": result["sources"], "eval_id": None,
+                   "retry_count": result["retry_count"]}
+
+        # SQL answers change with every new invoice: never cached, no RAGAS.
+
+        if route == "open" and result["context_chunks"]:
+
             if self.ctx.settings.reflection_enabled:
-                eval_id = self.ctx.repo.create_rag_eval(question, answer, route, invoice_id)
-                payload["eval_id"] = eval_id
-                threading.Thread(target=self._reflect, args=(eval_id, question, answer, chunks), daemon=True,
-                                 name="rag-reflect").start()
-            self.cache.set(invoice_id, question, payload, vendor)
+                payload["eval_id"] = self._save_evaluation(question, answer, route, invoice_id, result)
+
+            # "awaiting review" answers go stale as soon as the review finishes.
+
+            if not result["note"]:
+                self.cache.set(invoice_id, question, payload, vendor)
+
         return self._response(invoice_id, payload, cache_hit=False)
 
+    def _save_evaluation(self, question: str, answer: str, route: str, invoice_id: str | None, result: dict) -> str:
+
+        repo = self.ctx.repo
+
+        eval_id = repo.create_rag_eval(question, answer, route, invoice_id)
+
+        scores = result["scores"]
+
+        if scores:
+            repo.save_rag_scores(eval_id, context_relevance=scores["context_relevance"], faithfulness=scores["faithfulness"],
+                                 answer_relevance=scores["answer_relevance"], low_confidence=not result["evaluation_passed"])
+        else:
+            repo.fail_rag_eval(eval_id, result["evaluation_error"] or "RAGAS evaluation did not run")
+
+        return eval_id
+
     def _response(self, invoice_id: str | None, payload: dict, *, cache_hit: bool) -> dict:
+
         eval_id = payload.get("eval_id")
+
         if eval_id:
             metrics = self.evaluation(eval_id) or {"state": "pending"}
         elif payload.get("route") == "structured":
             metrics = {"state": "not_applicable"}
         else:
             metrics = {"state": "disabled"} if not self.ctx.settings.reflection_enabled else {"state": "not_applicable"}
+
         keys = ("context_relevance", "faithfulness", "answer_relevance", "low_confidence_warning", "state", "error")
+
         return {"invoice_id": invoice_id, "answer": payload["answer"], "cache_hit": cache_hit,
                 "ragas_metrics": {k: metrics.get(k) for k in keys if k in metrics}, "sources": payload.get("sources", []),
-                "route": payload.get("route", "open"), "eval_id": eval_id}
-
-    # ---- RAGAS (background) --------------------------------------------------------------------------
-    def _reflect(self, eval_id: str, question: str, answer: str, chunks: list[str]) -> None:
-        try:
-            with traced_span("rag_reflection", eval_id=eval_id):
-                scores = self.evaluator.evaluate(question, answer, chunks)
-                low = scores.low_confidence(self.ctx.settings)
-                self.ctx.repo.save_rag_scores(eval_id, context_relevance=scores.context_relevance, faithfulness=scores.faithfulness,
-                                              answer_relevance=scores.answer_relevance, low_confidence=low)
-                for name in ("context_relevance", "faithfulness", "answer_relevance"):
-                    record_score(f"ragas_{name}", getattr(scores, name))
-        except Exception as exc:  # noqa: BLE001 - never lose the reason; the answer itself was already returned
-            log.exception("RAGAS evaluation failed", extra={"eval_id": eval_id})
-            try:
-                self.ctx.repo.fail_rag_eval(eval_id, f"{type(exc).__name__}: {exc}")
-            except Exception:  # noqa: BLE001
-                log.exception("could not record the RAGAS failure", extra={"eval_id": eval_id})
+                "route": payload.get("route", "open"), "eval_id": eval_id, "retry_count": payload.get("retry_count", 0)}
 
     def evaluation(self, eval_id: str) -> dict | None:
+
         row = self.ctx.repo.get_rag_eval(eval_id)
+
         if row is None:
             return None
+
         base = {"eval_id": eval_id, "state": row["state"], "error": row["error"], "context_relevance": None, "faithfulness": None,
                 "answer_relevance": None, "low_confidence_warning": None}
+
         if row["state"] == "done":
             base.update(context_relevance=float(row["context_relevance"]), faithfulness=float(row["faithfulness"]),
                         answer_relevance=float(row["answer_relevance"]), low_confidence_warning=bool(row["low_confidence"]))
+
         return base
 
     # ---- reindex (from PostgreSQL + report snapshots only) ---------------------------------------------
+
     def reindex(self, invoice_id: str | None = None) -> int:
         """Rebuild vectors from PostgreSQL only — no OCR, no file reads of the invoice binaries."""
         import json as _json

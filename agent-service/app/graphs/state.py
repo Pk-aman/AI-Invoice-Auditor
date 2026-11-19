@@ -3,7 +3,9 @@ the texts are read back from PostgreSQL and dropped from state. Parsed fields, v
 the checkpoint (plus Qdrant/Redis) until finalization (SQL Write #2)."""
 from __future__ import annotations
 
-from typing import Any, TypedDict
+from typing import Any, List, Optional, TypedDict
+
+from langchain_core.documents import Document
 
 
 class InvoiceState(TypedDict, total=False):
@@ -52,16 +54,40 @@ class InvoiceState(TypedDict, total=False):
     warnings: list[str]
 
 
-class RagState(TypedDict, total=False):
+# ================================================================
+# RAG: LANGGRAPH STATE
+# ================================================================
+
+class RAGState(TypedDict):
+
     question: str
-    invoice_id: str | None
-    vendor: str | None
-    route: str                       # structured | open
-    template: str | None
-    params: dict
-    rows: list[dict]
-    hits: list[Any]
+
+    invoice_id: Optional[str]
+
+    vendor: Optional[str]
+
+    query_type: str
+
+    sql_action: str
+
+    invoice_number: str
+
+    note: str
+
+    retrieved_docs: List[Document]
+
     context: str
-    context_chunks: list[str]
-    sources: list[dict]
+
+    context_chunks: List[str]
+
+    sources: List[dict]
+
     answer: str
+
+    scores: dict
+
+    passed: bool
+
+    retry_count: int
+
+    evaluation_error: str

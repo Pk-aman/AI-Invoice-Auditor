@@ -103,7 +103,7 @@ class RagSource(BaseModel):
 
 
 class RagasMetrics(BaseModel):
-    """RAGAS scores. Every value is null (and `state` != done) until the asynchronous evaluation has finished."""
+    """RAGAS scores. Every value is null unless `state` is done (failed: `error` says why)."""
 
     context_relevance: float | None = None
     faithfulness: float | None = None
@@ -120,7 +120,8 @@ class RagAnswer(BaseModel):
     ragas_metrics: RagasMetrics = Field(default_factory=RagasMetrics)
     sources: list[RagSource] = Field(default_factory=list)
     route: str = "open"
-    eval_id: str | None = Field(default=None, description="poll GET /rag/evaluations/{eval_id} until state is done")
+    eval_id: str | None = Field(default=None, description="GET /rag/evaluations/{eval_id} returns the stored RAGAS scores")
+    retry_count: int = Field(default=0, description="extra retrieval rounds run because a RAGAS score was below its threshold")
 
 
 class RagEvaluation(RagasMetrics):

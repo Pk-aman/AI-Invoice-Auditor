@@ -82,7 +82,22 @@ Correctable fields: `invoice_number, vendor_name, po_number, invoice_date, curre
 
 ### RAG
 
-`POST /rag/query` → `{invoice_id, answer, cache_hit, ragas_metrics{context_relevance, faithfulness, answer_relevance, low_confidence_warning, state}, sources[{source_type, chunk_text}], route, eval_id}`. RAGAS (the `ragas` package, pinned) runs asynchronously: `ragas_metrics.state` is `pending` with null scores until `GET /rag/evaluations/<eval_id>` reports `done`. Answers to open questions are cached in Redis under `rag:{invoice_id|all}:{sha256(normalised question)}` for `RAG_CACHE_TTL_S` (3600 s); submitting corrections deletes `rag:{invoice_id}:*` (and cross-invoice `rag:all:*`) with a `SCAN` loop *before* re-validation and logs the count. The generic LLM cache (`llm:*`) is separate.
+The RAG code lives in `agent-service/app/agents/rag/` (one file per agent) and `app/graphs/rag_graph.py`:
+
+```
+router -> sql -> END
+       -> retrieve -> augment -> generate -> reflect -> END
+             ^                                 |
+             +------------- retry <------------+   (a RAGAS score below its threshold, at most RAG_MAX_RETRIES)
+```
+
+- **router / sql** — the LLM (`with_structured_output`) picks SQL or RAG and one of a fixed list of parameterised queries (the LLM never writes SQL). An invoice awaiting human review has no final values in PostgreSQL yet, so its question is answered from the AI report, with a note.
+- **retrieve** — Qdrant search (`RAG_TOP_K`, +5 per retry), filtered to the selected invoice/vendor.
+- **augment** — the LLM scores each chunk 0–10 (reranking without PyTorch/Hugging Face); the best `RAG_FINAL_CONTEXT_K` (4) become the context.
+- **generate** — answers only from that context.
+- **reflect / retry** — RAGAS (the `ragas` package, pinned): context relevance, faithfulness, answer relevance against `RAGAS_MIN_*` (0.7). RAGAS failures are recorded, not retried. `RAG_REFLECTION=off` skips it.
+
+`POST /rag/query` → `{invoice_id, answer, cache_hit, ragas_metrics{context_relevance, faithfulness, answer_relevance, low_confidence_warning, state}, sources[{source_type, chunk_text, score, rerank_score}], route, eval_id, retry_count}`. RAGAS runs inside the graph, so the scores come back with the answer (`state` = `done`, or `failed` with the reason) and are stored in `audit.rag_evaluations`; `GET /rag/evaluations/<eval_id>` returns them again. The RAGAS judge is `LLM_GENERATION_MODEL`, which must reliably return JSON (Bedrock Nova Lite, or e.g. `ollama/qwen2.5:7b-instruct`); with `llama3.2` (3B) faithfulness and answer relevance cannot be scored and the evaluation ends as `failed`. Answers to open questions are cached in Redis under `rag:{invoice_id|all}:{sha256(normalised question)}` for `RAG_CACHE_TTL_S` (3600 s); submitting corrections deletes `rag:{invoice_id}:*` (and cross-invoice `rag:all:*`) with a `SCAN` loop *before* re-validation and logs the count. The generic LLM cache (`llm:*`) is separate.
 
 ### Observability (LangFuse, optional)
 

@@ -1,55 +1,122 @@
-"""LangGraph RAG pipeline: route -> (sql | retrieve -> augment -> generate). Reflection (RAG Triad) runs
-after the answer is returned (see services/rag_service.py + services/ragas_evaluator.py) because judging with an LLM is slow."""
-from __future__ import annotations
+# ================================================================
+# AI INVOICE AUDITOR - RAG: LANGGRAPH
+#
+#   router -> sql -> END
+#          -> retrieve -> augment -> generate -> reflect -> END
+#                ^                                 |
+#                +------------- retry <------------+  (score below threshold)
+#
+# The nodes live in app/agents/rag/:
+#   router.py (router, sql), retrieval.py, augmentation.py,
+#   generation.py, reflection.py (reflect, retry)
+# ================================================================
 
-import logging
+from langgraph.graph import StateGraph, START, END
 
-from langgraph.graph import END, StateGraph
+from app.agents.rag.router import router_node, sql_node
+from app.agents.rag.retrieval import retrieval_node
+from app.agents.rag.augmentation import augmentation_node
+from app.agents.rag.generation import generation_node
+from app.agents.rag.reflection import reflection_node, route_after_reflection, retry_node
+from app.graphs.state import RAGState
 
-from app.agents.rag import augmentation, generation, retrieval, router
-from app.core.context import AppContext
-from app.graphs.state import RagState
+# ================================================================
+# STEP 19: BUILD LANGGRAPH
+# ================================================================
 
-log = logging.getLogger(__name__)
+def build_graph():
 
+    workflow = StateGraph(RAGState)
 
-def build_rag_graph(ctx: AppContext):
-    s = ctx.settings
+    # STEP 1: Add nodes.
 
-    def route_node(state: RagState) -> dict:
-        plan = router.route(state["question"], ctx.llm, state.get("invoice_id"))
-        return {"route": plan.kind, "template": plan.template, "params": plan.params}
+    workflow.add_node("router", router_node)
 
-    def sql_node(state: RagState) -> dict:
-        plan = router.RoutePlan("structured", state["template"], state["params"])
-        sql, _ = router.TEMPLATES[state["template"]]  # type: ignore[index]
-        rows = ctx.repo.run_template(sql, router.sql_params(plan))
-        return {"rows": rows, "answer": router.format_rows(state["template"], rows),  # type: ignore[arg-type]
-                "sources": [{"ref": "DB", "source_type": "database", "chunk_text": router.format_rows(state["template"], rows),  # type: ignore[arg-type]
-                             "template": state["template"], "rows": len(rows)}]}
+    workflow.add_node("sql", sql_node)
 
-    def retrieve_node(state: RagState) -> dict:
-        hits = retrieval.retrieve(ctx.qdrant, s.qdrant_collection, ctx.llm, state["question"], invoice_id=state.get("invoice_id"),
-                                  vendor=state.get("vendor"), top_k=s.rag_top_k)
-        return {"hits": hits}
+    workflow.add_node("retrieve", retrieval_node)
 
-    def augment_node(state: RagState) -> dict:
-        c = augmentation.assemble(state["question"], state.get("hits", []), s.rag_max_context_tokens)
-        return {"context": c.text, "sources": c.sources, "context_chunks": c.chunks}
+    workflow.add_node("augment", augmentation_node)
 
-    def generate_node(state: RagState) -> dict:
-        return {"answer": generation.generate(state["question"], state.get("context", ""), ctx.llm)}
+    workflow.add_node("generate", generation_node)
 
-    g = StateGraph(RagState)
-    g.add_node("route", route_node)
-    g.add_node("sql", sql_node)
-    g.add_node("retrieve", retrieve_node)
-    g.add_node("augment", augment_node)
-    g.add_node("generate", generate_node)
-    g.set_entry_point("route")
-    g.add_conditional_edges("route", lambda st: st["route"], {"structured": "sql", "open": "retrieve"})
-    g.add_edge("sql", END)
-    g.add_edge("retrieve", "augment")
-    g.add_edge("augment", "generate")
-    g.add_edge("generate", END)
-    return g.compile()
+    workflow.add_node("reflect", reflection_node)
+
+    workflow.add_node("retry", retry_node)
+
+    # STEP 2: Start with router.
+
+    workflow.add_edge(
+        START,
+        "router"
+    )
+
+    # STEP 3: Choose SQL or RAG path.
+
+    workflow.add_conditional_edges(
+
+        "router",
+
+        lambda state: state["query_type"],
+
+        {
+            "sql": "sql",
+            "rag": "retrieve"
+        }
+    )
+
+    # STEP 4: SQL path.
+    # An invoice still awaiting human review has no final values in
+    # PostgreSQL yet: sql_node switches it to the RAG path.
+
+    workflow.add_conditional_edges(
+
+        "sql",
+
+        lambda state: state["query_type"],
+
+        {
+            "sql": END,
+            "rag": "retrieve"
+        }
+    )
+
+    # STEP 5: RAG path.
+
+    workflow.add_edge(
+        "retrieve",
+        "augment"
+    )
+
+    workflow.add_edge(
+        "augment",
+        "generate"
+    )
+
+    workflow.add_edge(
+        "generate",
+        "reflect"
+    )
+
+    # STEP 6: Reflection routing.
+
+    workflow.add_conditional_edges(
+
+        "reflect",
+
+        route_after_reflection,
+
+        {
+            "end": END,
+            "retry": "retry"
+        }
+    )
+
+    # STEP 7: Retry returns to retrieval.
+
+    workflow.add_edge(
+        "retry",
+        "retrieve"
+    )
+
+    return workflow.compile()

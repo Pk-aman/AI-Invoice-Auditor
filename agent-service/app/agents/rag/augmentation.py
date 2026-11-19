@@ -1,54 +1,187 @@
-"""Augmentation agent: hybrid rerank (vector rank + BM25 rank fused with RRF) and context assembly."""
-from __future__ import annotations
+# ================================================================
+# AI INVOICE AUDITOR - RAG: RERANKER + AUGMENTATION AGENT
+# ================================================================
 
-import re
-from dataclasses import dataclass
+import logging
 
-from rank_bm25 import BM25Okapi
+from typing import List
 
-from app.agents.rag.retrieval import Hit
+from pydantic import BaseModel, Field
 
-RRF_K = 60
+from langchain_core.prompts import ChatPromptTemplate
+
+from app.agents.rag import setup
+from app.graphs.state import RAGState
+
+log = logging.getLogger(__name__)
+
+# ================================================================
+# STEP 8: RERANKER (LLM)
+# ================================================================
+
+# Qdrant retrieves candidate chunks using vector similarity.
+# The LLM reranks those chunks using question-document relevance,
+# like a cross-encoder, but through LiteLLM (no PyTorch / Hugging Face).
+
+class RerankScores(BaseModel):
+
+    scores: List[float] = Field(
+        description=(
+            "One relevance score from 0 (useless) to 10 (directly answers "
+            "the question) for EVERY passage, in the same order as the passages"
+        )
+    )
 
 
-@dataclass
-class Context:
-    text: str  # numbered passages, ready for the prompt
-    sources: list[dict]
-    chunks: list[str]  # the raw retrieved passages (RAGAS "retrieved_contexts")
+def rerank_documents(question, documents):
 
+    # Create the numbered list of passages.
 
-def _tokens(s: str) -> list[str]:
-    return re.findall(r"\w+", s.lower())
+    passages = "\n\n".join(
+        f"[{index}] {doc.page_content[:600]}"
+        for index, doc in enumerate(documents, start=1)
+    )
 
+    prompt = ChatPromptTemplate.from_messages([
 
-def rerank(question: str, hits: list[Hit]) -> list[Hit]:
-    if len(hits) <= 1:
-        return hits
-    vec_rank = {h.id: r for r, h in enumerate(sorted(hits, key=lambda x: -x.score))}
-    bm25 = BM25Okapi([_tokens(h.text) or ["_"] for h in hits])
-    scores = bm25.get_scores(_tokens(question) or ["_"])
-    lex_rank = {hits[i].id: r for r, i in enumerate(sorted(range(len(hits)), key=lambda i: -scores[i]))}
-    fused = {h.id: 1 / (RRF_K + vec_rank[h.id]) + 1 / (RRF_K + lex_rank[h.id]) for h in hits}
-    return sorted(hits, key=lambda h: -fused[h.id])
+        (
+            "system",
 
+            """
+            You rank text passages by how useful they are for answering
+            a question about invoices. Give every passage a score.
+            """
+        ),
 
-def assemble(question: str, hits: list[Hit], max_tokens: int = 3000) -> Context:
-    budget = max_tokens * 4  # ~4 chars per token
-    ordered = rerank(question, hits)
-    parts: list[str] = []
-    sources: list[dict] = []
-    chunks: list[str] = []
-    used = 0
-    for h in ordered:
-        if used + len(h.text) > budget and parts:
-            break
-        n = len(parts) + 1
-        p = h.payload
-        parts.append(f"[S{n}] (invoice {p.get('invoice_number') or p.get('invoice_id')}, {p.get('source_type')}) {h.text}")
-        sources.append({"ref": f"S{n}", "invoice_id": p.get("invoice_id"), "invoice_number": p.get("invoice_number"),
-                        "source_type": p.get("source_type"), "vendor": p.get("vendor"), "score": round(h.score, 4),
-                        "chunk_text": h.text})
-        chunks.append(h.text)
-        used += len(h.text)
-    return Context("\n\n".join(parts), sources, chunks)
+        (
+            "human",
+
+            """
+            Question: {question}
+
+            Passages ({count} in total):
+
+            {passages}
+            """
+        )
+
+    ])
+
+    rerank_chain = (
+        prompt
+        | setup.llm.with_structured_output(RerankScores)
+    )
+
+    # Calculate relevance scores.
+
+    try:
+
+        scores = rerank_chain.invoke({
+            "question": question,
+            "count": len(documents),
+            "passages": passages
+        }).scores
+
+        if len(scores) != len(documents):
+            raise ValueError(f"{len(scores)} scores for {len(documents)} passages")
+
+    except Exception:
+
+        # Keep Qdrant's vector-similarity order.
+
+        log.warning("LLM rerank failed; keeping the vector order", exc_info=True)
+
+        scores = [
+            doc.metadata.get("score", 0.0)
+            for doc in documents
+        ]
+
+    # Combine documents with scores.
+
+    ranked_documents = list(
+        zip(documents, scores)
+    )
+
+    # Highest relevance score first.
+
+    ranked_documents.sort(
+        key=lambda item: item[1],
+        reverse=True
+    )
+
+    return ranked_documents
+
+# ================================================================
+# STEP 14: AUGMENTATION AGENT
+# ================================================================
+
+def augmentation_node(state: RAGState):
+
+    question = state["question"]
+
+    documents = state["retrieved_docs"]
+
+    if not documents:
+
+        return {
+            "context": "",
+            "context_chunks": [],
+            "sources": []
+        }
+
+    # STEP 1: Rerank retrieved documents.
+
+    ranked_documents = rerank_documents(
+        question,
+        documents
+    )
+
+    # STEP 2: Select top relevant chunks.
+
+    selected_documents = ranked_documents[
+        :setup.FINAL_CONTEXT_K
+    ]
+
+    # STEP 3: Assemble final context.
+
+    context_parts = []
+
+    sources = []
+
+    for doc, score in selected_documents:
+
+        context_parts.append(
+            f"""
+            Source Type: {doc.metadata.get("source_type")}
+
+            Invoice ID: {doc.metadata.get("invoice_id")}
+
+            Vendor: {doc.metadata.get("vendor")}
+
+            Relevance Score: {float(score):.4f}
+
+            Content:
+            {doc.page_content}
+            """
+        )
+
+        # Shown under the answer in the UI.
+
+        sources.append({
+            "ref": f"S{len(sources) + 1}",
+            "source_type": doc.metadata.get("source_type"),
+            "invoice_id": doc.metadata.get("invoice_id"),
+            "invoice_number": doc.metadata.get("invoice_number"),
+            "vendor": doc.metadata.get("vendor"),
+            "score": round(float(doc.metadata.get("score", 0.0)), 4),
+            "rerank_score": round(float(score), 4),
+            "chunk_text": doc.page_content
+        })
+
+    context = "\n\n".join(context_parts)
+
+    return {
+        "context": context,
+        "context_chunks": [doc.page_content for doc, _ in selected_documents],
+        "sources": sources
+    }

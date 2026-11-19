@@ -62,12 +62,10 @@ class Settings(BaseSettings):
     ragas_min_context_relevance: float = 0.7
     ragas_min_faithfulness: float = 0.7
     ragas_min_answer_relevance: float = 0.7
-    # How ragas asks the judge LLM for structured output. MD_JSON (JSON in a markdown block) works with every model; the
-    # default tool-calling mode made llama3.2 return stringified arrays (schema validation failures). See README.
-    ragas_instructor_mode: str = "MD_JSON"
     ragas_timeout_s: int = 180
-    rag_top_k: int = 12
-    rag_max_context_tokens: int = 3000
+    rag_top_k: int = 10            # RETRIEVAL_K: chunks fetched from Qdrant (+5 per retry)
+    rag_final_context_k: int = 4   # FINAL_CONTEXT_K: chunks kept after reranking
+    rag_max_retries: int = 1       # MAX_RETRIES: retries when a RAGAS score is below its threshold
     chunk_chars: int = 2000
     chunk_overlap_chars: int = 200
 
