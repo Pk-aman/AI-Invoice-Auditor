@@ -8,6 +8,7 @@ import sys
 from datetime import UTC, datetime
 
 correlation_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("correlation_id", default=None)
+request_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("request_id", default=None)
 
 _RESERVED = set(logging.LogRecord("x", 0, "x", 0, "", (), None).__dict__) | {"message", "asctime"}
 
@@ -23,6 +24,8 @@ class JsonFormatter(logging.Formatter):
         cid = correlation_id.get()
         if cid:
             payload["correlation_id"] = cid
+        if rid := request_id.get():
+            payload["request_id"] = rid
         for k, v in record.__dict__.items():
             if k not in _RESERVED and not k.startswith("_"):
                 payload[k] = v

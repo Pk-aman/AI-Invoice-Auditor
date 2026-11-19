@@ -20,6 +20,8 @@ class InvoiceSummary(BaseModel):
     source_language: str | None = None
     translation_confidence: float | None = None
     validation_run: int = 1
+    status: str = "INGESTED"          # INGESTED (awaiting/under review) | APPROVED | REJECTED | SKIPPED_MAX_RETRIES | LEGACY_FINALIZED
+    human_check_count: int = 0
     processed_at: datetime | None = None
 
 
@@ -37,6 +39,9 @@ class InvoiceDetail(InvoiceSummary):
     ocr_confidence: float | None = None
     extracted_raw: dict[str, Any] | None = None
     report_available: bool = False
+    ai_report_available: bool = False  # the immutable AI report is stored in PostgreSQL once the invoice is finalized
+    content_checksum: str | None = None
+    finalized_at: datetime | None = None
     pending_corrections: int = 0
     corrections: dict[str, str | None] = Field(
         default_factory=dict, description="latest corrected value per field (effective values)"
@@ -108,10 +113,22 @@ class UploadResult(BaseModel):
     reason: str | None = None
 
 
+class ReviewDecision(BaseModel):
+    id: int
+    invoice_id: uuid.UUID
+    review_round: int
+    decision: str
+    reviewer: str
+    comments: str | None = None
+    human_check_count: int
+    decided_at: datetime | None = None
+
+
 class UploadStatus(BaseModel):
     checksum: str
     invoice_id: uuid.UUID | None = None
-    status: Literal["QUEUED", "PROCESSING", "COMPLETED", "FAILED"]
+    existing_invoice_id: uuid.UUID | None = None  # set when status is DUPLICATE
+    status: Literal["QUEUED", "PROCESSING", "NEEDS_REVIEW", "COMPLETED", "FAILED", "DUPLICATE"]
     stage: str | None = None
     state: str | None = None
     error: str | None = None
@@ -124,14 +141,17 @@ class DocumentSummary(BaseModel):
     filename: str | None = None
     file_type: str = ""
     uploaded_at: datetime
-    processing_status: str  # audited | processing | failed | awaiting
-    audit_result: str  # no_issues | needs_attention | not_available
+    processing_status: str  # audited | review | processing | failed | awaiting | duplicate
+    audit_result: str  # no_issues | needs_attention | approved | rejected | not_available
     invoice_id: uuid.UUID | None = None
     invoice_number: str | None = None
     vendor_name: str | None = None
     currency: str | None = None
     total_amount: Decimal | None = None
     recommendation: str | None = None
+    status: str | None = None
+    human_check_count: int | None = None
+    duplicate_of: uuid.UUID | None = None
     error: str | None = None
 
 
@@ -145,6 +165,7 @@ class DocumentList(BaseModel):
 class DocumentStats(BaseModel):
     total: int
     processing: int
+    awaiting_review: int = 0
     audited: int
     needs_attention: int
     awaiting: int

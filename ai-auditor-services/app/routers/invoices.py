@@ -3,7 +3,7 @@ from datetime import date
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy import Connection
 
 from app.core.config import get_settings
@@ -19,6 +19,7 @@ from app.schemas.audit import (
     InvoiceText,
     LineItem,
     ProcessingEvent,
+    ReviewDecision,
 )
 from app.services import feedback_service, report_service
 
@@ -57,6 +58,7 @@ def get_invoice(invoice_id: uuid.UUID, conn: Connection = Depends(get_conn)):
     inv = invoice_repo.get_invoice(conn, invoice_id)
     if not inv:
         raise AppError(404, "invoice_not_found", "Invoice not found.")
+    inv["report_available"] = report_service.resolve_report_path(get_settings().reports_dir, invoice_id, "json") is not None
     inv["pending_corrections"] = feedback_repo.pending_count(conn, invoice_id)
     inv["corrections"] = feedback_repo.latest_corrections(conn, invoice_id)
     return inv
@@ -102,8 +104,36 @@ def get_report(invoice_id: uuid.UUID, format: Literal["html", "json"] = "html",
         "Content-Security-Policy": "sandbox", "X-Content-Type-Options": "nosniff"})
 
 
+@router.get("/{invoice_id}/ai-report")
+def get_ai_report(invoice_id: uuid.UUID, conn: Connection = Depends(get_conn)):
+    """The immutable AI audit report exactly as stored in PostgreSQL (written once, at finalization).
+    Human corrections never change it; they live in /feedback and in later validation runs."""
+    found, report = invoice_repo.ai_audit_report(conn, invoice_id)
+    if not found:
+        raise AppError(404, "invoice_not_found", "Invoice not found.")
+    if report is None:
+        raise AppError(404, "ai_report_not_stored", "The AI report is stored when the invoice is finalized; "
+                                                     "while it is under review use the report endpoint.")
+    return Response(report, media_type="application/json", headers={"X-Content-Type-Options": "nosniff"})
+
+
+@router.get("/{invoice_id}/reviews", response_model=list[ReviewDecision])
+def get_reviews(invoice_id: uuid.UUID, conn: Connection = Depends(get_conn)):
+    """Human review history (decision, reviewer, notes, running human_check_count)."""
+    _require(conn, invoice_id)
+    return invoice_repo.review_decisions(conn, invoice_id)
+
+
 @router.post("/{invoice_id}/feedback", response_model=Feedback, status_code=201)
 def post_feedback(invoice_id: uuid.UUID, body: FeedbackIn, conn: Connection = Depends(get_conn)):
+    """Append-only correction note for a FINALIZED invoice. While an invoice is awaiting review, corrections are
+    submitted through the agent's review endpoint (POST /invoices/{id}/review) so they are validated and re-validated."""
+    status = invoice_repo.invoice_status(conn, invoice_id)
+    if status is None:
+        raise AppError(404, "invoice_not_found", "Invoice not found.")
+    if status == "INGESTED":
+        raise AppError(409, "invoice_under_review",
+                       "This invoice is still under review. Submit corrections with the review action instead.")
     return feedback_service.add_feedback(conn, invoice_id, body.field_name, body.corrected_value, body.corrected_by)
 
 

@@ -1,0 +1,8 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = ["ignore::DeprecationWarning", "ignore::UserWarning"]
+markers = ["db: needs a PostgreSQL initialised with infra/postgres/init (set TEST_DATABASE_URL and TEST_ADMIN_DATABASE_URL)"]
+
+[tool.ruff]
+line-length = 140

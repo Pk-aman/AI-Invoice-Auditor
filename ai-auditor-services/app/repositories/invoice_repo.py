@@ -13,7 +13,8 @@ SORTABLE = {
 
 SUMMARY_COLS = (
     "invoice_id, invoice_number, vendor_name, vendor_id, po_number, invoice_date, currency, total_amount, "
-    "validation_status, recommendation, source_language, translation_confidence, validation_run, processed_at"
+    "validation_status, recommendation, source_language, translation_confidence, validation_run, status, "
+    "human_check_count, processed_at"
 )
 
 
@@ -72,7 +73,7 @@ def get_invoice(conn: Connection, invoice_id: uuid.UUID) -> dict | None:
     row = conn.execute(
         text(
             f"SELECT {SUMMARY_COLS}, file_path, file_checksum, extraction_method, ocr_confidence, "
-            "extracted_raw, (report_path IS NOT NULL) AS report_available "
+            "extracted_raw, content_checksum, finalized_at, (ai_audit_report IS NOT NULL) AS ai_report_available "
             "FROM audit.invoice_audit WHERE invoice_id = :i"
         ),
         {"i": invoice_id},
@@ -158,3 +159,22 @@ def insert_event(conn: Connection, *, file_path, checksum, stage, state, detail)
         ),
         {"p": file_path, "c": checksum, "s": stage, "st": state, "d": json.dumps(detail)},
     )
+
+
+def ai_audit_report(conn: Connection, invoice_id: uuid.UUID) -> tuple[bool, str | None]:
+    """(invoice exists, the immutable run-1 AI report exactly as stored in PostgreSQL)."""
+    row = conn.execute(text("SELECT ai_audit_report FROM audit.invoice_audit WHERE invoice_id=:i"), {"i": invoice_id}).first()
+    return (row is not None, row[0] if row else None)
+
+
+def invoice_status(conn: Connection, invoice_id: uuid.UUID) -> str | None:
+    return conn.execute(text("SELECT status FROM audit.invoice_audit WHERE invoice_id=:i"), {"i": invoice_id}).scalar()
+
+
+def review_decisions(conn: Connection, invoice_id: uuid.UUID) -> list[dict]:
+    rows = conn.execute(
+        text("SELECT id, invoice_id, review_round, decision, reviewer, comments, human_check_count, decided_at "
+             "FROM audit.review_decisions WHERE invoice_id=:i ORDER BY review_round"),
+        {"i": invoice_id},
+    ).mappings().all()
+    return [dict(r) for r in rows]

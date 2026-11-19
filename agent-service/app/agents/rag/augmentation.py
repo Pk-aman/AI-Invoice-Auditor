@@ -15,6 +15,7 @@ RRF_K = 60
 class Context:
     text: str  # numbered passages, ready for the prompt
     sources: list[dict]
+    chunks: list[str]  # the raw retrieved passages (RAGAS "retrieved_contexts")
 
 
 def _tokens(s: str) -> list[str]:
@@ -37,6 +38,7 @@ def assemble(question: str, hits: list[Hit], max_tokens: int = 3000) -> Context:
     ordered = rerank(question, hits)
     parts: list[str] = []
     sources: list[dict] = []
+    chunks: list[str] = []
     used = 0
     for h in ordered:
         if used + len(h.text) > budget and parts:
@@ -46,6 +48,7 @@ def assemble(question: str, hits: list[Hit], max_tokens: int = 3000) -> Context:
         parts.append(f"[S{n}] (invoice {p.get('invoice_number') or p.get('invoice_id')}, {p.get('source_type')}) {h.text}")
         sources.append({"ref": f"S{n}", "invoice_id": p.get("invoice_id"), "invoice_number": p.get("invoice_number"),
                         "source_type": p.get("source_type"), "vendor": p.get("vendor"), "score": round(h.score, 4),
-                        "excerpt": h.text[:300]})
+                        "chunk_text": h.text})
+        chunks.append(h.text)
         used += len(h.text)
-    return Context("\n\n".join(parts), sources)
+    return Context("\n\n".join(parts), sources, chunks)

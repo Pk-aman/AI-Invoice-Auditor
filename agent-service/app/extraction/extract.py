@@ -1,4 +1,4 @@
-"""Text extraction: PDF (pdfplumber, OCR fallback per page), DOCX (python-docx), images (Tesseract + OpenCV preprocessing)."""
+"""Text extraction: PDF (PyMuPDF direct-first, per-page Tesseract fallback), DOCX (python-docx), images (Tesseract + OpenCV preprocessing)."""
 from __future__ import annotations
 
 import logging
@@ -14,14 +14,19 @@ IMAGE_EXT = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 SUPPORTED_EXT = PDF_EXT | DOCX_EXT | IMAGE_EXT
 
 
+FAILED_METHOD = "failed"
+
+
 class ExtractionError(RuntimeError):
-    pass
+    """Extraction could not produce text. `method` is what gets reported in the processing event."""
+
+    method = FAILED_METHOD
 
 
 @dataclass
 class ExtractionResult:
     text: str
-    method: str  # pdfplumber | docx | tesseract | pdfplumber+tesseract
+    method: str  # pymupdf | tesseract | pymupdf+tesseract | docx  (FAILED_METHOD is only ever reported, never stored)
     ocr_confidence: float | None = None  # 0..1 mean word confidence, when OCR was used
 
 
@@ -99,40 +104,57 @@ def extract_image(path: Path, langs: str) -> ExtractionResult:
 
 
 # ---- pdf ---------------------------------------------------------------------
+def _render_page(page, dpi: int = 300):
+    """Render ONE PDF page to a PIL image (PyMuPDF; no Poppler needed)."""
+    from PIL import Image
+
+    pix = page.get_pixmap(dpi=dpi, alpha=False)
+    return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+
+
 def extract_pdf(path: Path, langs: str, min_chars: int = 30) -> ExtractionResult:
-    import pdfplumber
+    """Direct-first: PyMuPDF text layer per page; pages with too little text are rendered and OCR'd individually.
+
+    Page order is preserved. method = pymupdf (no OCR) | tesseract (every page OCR'd) | pymupdf+tesseract (mixed).
+    """
+    import pymupdf
 
     pages: list[str] = []
-    used_ocr = False
+    ocr_pages = 0
     confs: list[float] = []
     try:
-        with pdfplumber.open(path) as pdf:
-            for i, page in enumerate(pdf.pages, start=1):
-                text = (page.extract_text() or "").strip()
-                if len(text) < min_chars:
-                    from pdf2image import convert_from_path
-
-                    if not tesseract_available():
-                        raise ExtractionError(f"page {i} has no text layer and Tesseract is not installed")
-                    try:
-                        images = convert_from_path(str(path), dpi=300, first_page=i, last_page=i)
-                    except Exception as exc:  # noqa: BLE001 - poppler missing / corrupt page
-                        raise ExtractionError(f"cannot render page {i} for OCR (Poppler installed?): {exc}") from exc
-                    text, conf = ocr_image(images[0], langs)
-                    used_ocr = True
-                    if conf is not None:
-                        confs.append(conf)
-                pages.append(text)
+        doc = pymupdf.open(str(path))
+    except Exception as exc:  # noqa: BLE001 - malformed pdf
+        raise ExtractionError(f"cannot read PDF: {type(exc).__name__}: {exc}") from exc
+    try:
+        if doc.needs_pass:
+            raise ExtractionError("cannot read PDF: it is password-protected")
+        for number, page in enumerate(doc, start=1):
+            text = (page.get_text("text") or "").strip()
+            if len(text) < min_chars:
+                if not tesseract_available():
+                    raise ExtractionError(f"page {number} has no text layer and Tesseract is not installed")
+                try:
+                    image = _render_page(page)
+                except Exception as exc:  # noqa: BLE001 - corrupt page
+                    raise ExtractionError(f"cannot render page {number} for OCR: {exc}") from exc
+                text, conf = ocr_image(image, langs)
+                ocr_pages += 1
+                if conf is not None:
+                    confs.append(conf)
+            pages.append(text)
     except ExtractionError:
         raise
-    except Exception as exc:  # noqa: BLE001 - malformed/encrypted pdf
+    except Exception as exc:  # noqa: BLE001 - anything else from the PDF engine
         raise ExtractionError(f"cannot read PDF: {type(exc).__name__}: {exc}") from exc
-    if not used_ocr:
-        method = "pdfplumber"
-    elif len(confs) < len(pages):
-        method = "pdfplumber+tesseract"  # some pages had a text layer, some needed OCR
-    else:
+    finally:
+        doc.close()
+    if ocr_pages == 0:
+        method = "pymupdf"
+    elif ocr_pages == len(pages):
         method = "tesseract"
+    else:
+        method = "pymupdf+tesseract"
     return ExtractionResult(text="\n\n".join(pages), method=method, ocr_confidence=(sum(confs) / len(confs) if confs else None))
 
 

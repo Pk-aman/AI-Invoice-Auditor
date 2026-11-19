@@ -27,9 +27,10 @@ h2,h3,h4 { letter-spacing:-0.025em !important; color:#172B3A; }
 </style>
 """
 
-PROCESSING_LABELS = {"audited": "Audited", "processing": "Processing", "failed": "Failed",
-                     "awaiting": "Awaiting backend"}
-AUDIT_LABELS = {"no_issues": "No issues", "needs_attention": "Needs attention", "not_available": "Not available"}
+PROCESSING_LABELS = {"audited": "Audited", "review": "Awaiting review", "processing": "Processing", "failed": "Failed",
+                     "awaiting": "Awaiting backend", "duplicate": "Duplicate"}
+AUDIT_LABELS = {"no_issues": "No issues", "needs_attention": "Needs attention", "approved": "Approved", "rejected": "Rejected",
+                "not_available": "Not available"}
 
 
 def apply_theme() -> None:
@@ -81,6 +82,10 @@ def audit_badge(result: str) -> None:
         st.badge("Needs attention", icon=":material/flag:", color="orange")
     elif result == "no_issues":
         st.badge("No issues", icon=":material/check_circle:", color="green")
+    elif result == "approved":
+        st.badge("Approved", icon=":material/verified:", color="green")
+    elif result == "rejected":
+        st.badge("Rejected", icon=":material/cancel:", color="red")
     else:
         st.markdown('<p class="cell">Not available</p>', unsafe_allow_html=True)
 

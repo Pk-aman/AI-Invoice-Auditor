@@ -129,12 +129,18 @@ def process_upload(
 
 
 # --- status derivation ---------------------------------------------------------------------------
-STAGE_ORDER = ["QUEUED", "DETECTED", "EXTRACT", "TRANSLATE", "PARSE", "DATA_VALIDATION",
-               "BUSINESS_VALIDATION", "REPORT", "INDEX", "COMPLETED"]
+STAGE_ORDER = ["QUEUED", "DETECTED", "EXTRACT", "TRANSLATE", "DEDUPE", "INGEST", "PARSE", "DATA_VALIDATION",
+               "BUSINESS_VALIDATION", "REPORT", "INDEX", "HUMAN_REVIEW", "REVALIDATE", "FINALIZE", "COMPLETED"]
 
 
 def derive_status(events: list[dict], invoice_id) -> dict | None:
+    """Map the processing-event log of one file to an upload status."""
+    content_dup = next((e for e in reversed(events) if e["stage"] == "DEDUPE" and e["state"] == "DUPLICATE"), None)
     real = [e for e in events if e["state"] != "DUPLICATE"]
+    if content_dup is not None:  # same invoice content already audited under another file
+        existing = (content_dup.get("detail") or {}).get("existing_invoice_id")
+        return {"status": "DUPLICATE", "stage": "DEDUPE", "state": "DUPLICATE", "existing_invoice_id": existing,
+                "updated_at": content_dup["created_at"], "error": None}
     if not real and invoice_id is None:
         return {"status_none": True} if not events else {"status": "QUEUED", "stage": "QUEUED", "state": "DUPLICATE"}
     last = real[-1] if real else None
@@ -146,9 +152,10 @@ def derive_status(events: list[dict], invoice_id) -> dict | None:
         out["status"] = "FAILED"
         detail = last.get("detail") or {}
         out["error"] = detail.get("error") or detail.get("reason") or "Processing failed."
+    elif last and last["stage"] == "HUMAN_REVIEW" and last["state"] == "PENDING":
+        out["status"] = "NEEDS_REVIEW"
     elif last and last["stage"] == "QUEUED":
         out["status"] = "QUEUED"
     else:
         out["status"] = "PROCESSING"
     return out
-

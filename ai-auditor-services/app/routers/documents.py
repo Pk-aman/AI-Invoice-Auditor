@@ -10,13 +10,13 @@ from app.core.config import get_settings
 from app.core.db import get_conn
 from app.core.errors import AppError
 from app.repositories import document_repo, invoice_repo
-from app.schemas.audit import DocumentDetail, DocumentList, DocumentStats, DocumentSummary, Finding
+from app.schemas.audit import DocumentDetail, DocumentList, DocumentStats, Finding
 from app.services.report_service import resolve_report_path
 
 router = APIRouter(prefix="/api/v1/documents", tags=["documents"])
 
-_PS = "^(audited|processing|failed|awaiting)$"
-_AR = "^(no_issues|needs_attention|not_available)$"
+_PS = "^(audited|review|processing|failed|awaiting|duplicate)$"
+_AR = "^(no_issues|needs_attention|approved|rejected|not_available)$"
 
 
 def _valid_id(document_id: str) -> str:
@@ -25,9 +25,27 @@ def _valid_id(document_id: str) -> str:
     return document_id
 
 
+def _report_json(invoice_id) -> dict | None:
+    path = resolve_report_path(get_settings().reports_dir, invoice_id, "json")
+    if path is None:
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
 def _summary(row: dict) -> dict:
+    """Until finalization only ingestion evidence is in PostgreSQL; the in-flight fields live in the report file."""
     ext = Path(row["filename"] or "").suffix.lower().lstrip(".")
-    return {**row, "file_type": ext}
+    row = {**row, "file_type": ext}
+    if row.get("invoice_id") and row.get("invoice_number") is None and row.get("processing_status") == "review":
+        rep = _report_json(row["invoice_id"])
+        if rep:
+            inv = rep.get("invoice") or {}
+            row.update(invoice_number=inv.get("invoice_number"), vendor_name=inv.get("vendor_name"), currency=inv.get("currency"),
+                       total_amount=inv.get("total_amount"), recommendation=rep.get("recommendation"))
+    return row
 
 
 @router.get("", response_model=DocumentList)
@@ -58,7 +76,7 @@ def _findings(conn: Connection, row: dict) -> tuple[list[dict], str | None, list
     inv = row.get("invoice_id")
     if inv is None:
         return findings, summary, reasons
-    path = resolve_report_path(get_settings().reports_dir, inv, "json")
+    path = resolve_report_path(get_settings().reports_dir, inv, "json")  # latest validation run
     if path:
         try:
             rep = json.loads(path.read_text(encoding="utf-8"))

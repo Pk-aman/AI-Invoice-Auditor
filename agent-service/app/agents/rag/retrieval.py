@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from qdrant_client import QdrantClient
 
+from app.agents.indexing import SOURCE_REPORT
 from app.clients.qdrant_client import invoice_filter
 from app.core.llm import LLM
 
@@ -31,7 +32,7 @@ def retrieve(client: QdrantClient, collection: str, llm: LLM, question: str, *, 
     hits: list[Hit] = []
     if source_type is None and _REPORT_BIAS.search(question):
         # "why was it flagged" is answered by the report, not the invoice text
-        hits = _search(client, collection, vector, invoice_filter(invoice_id, vendor, "report"), top_k)
+        hits = _search(client, collection, vector, invoice_filter(invoice_id, vendor, SOURCE_REPORT), top_k)
     if len(hits) < 3:
         seen = {h.id for h in hits}
         extra = _search(client, collection, vector, invoice_filter(invoice_id, vendor, source_type), top_k)

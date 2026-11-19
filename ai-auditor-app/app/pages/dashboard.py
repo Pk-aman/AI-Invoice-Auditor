@@ -4,10 +4,10 @@ from app import api_client, ui
 from app.api_client import ApiError
 from app.config import PAGE_SIZE
 
-STATUS_OPTIONS = {"All statuses": None, "Audited": "audited", "Processing": "processing",
-                  "Failed": "failed", "Awaiting backend": "awaiting"}
+STATUS_OPTIONS = {"All statuses": None, "Awaiting review": "review", "Audited": "audited", "Processing": "processing",
+                  "Failed": "failed", "Duplicate": "duplicate", "Awaiting backend": "awaiting"}
 RESULT_OPTIONS = {"All results": None, "No issues": "no_issues", "Needs attention": "needs_attention",
-                  "Not available": "not_available"}
+                  "Approved": "approved", "Rejected": "rejected", "Not available": "not_available"}
 DATE_OPTIONS = {"All time": None, "Last 7 days": 7, "Last 30 days": 30}
 
 
@@ -50,16 +50,17 @@ except ApiError as exc:
         st.rerun()
     st.stop()
 
-cols = st.columns(4)
+cols = st.columns(5)
 cols[0].metric("Total invoices", stats["total"])
 cols[1].metric("Processing", stats["processing"])
-cols[2].metric("Audited", stats["audited"])
-cols[3].metric("Needs attention", stats["needs_attention"])
+cols[2].metric("Awaiting review", stats.get("awaiting_review", 0))
+cols[3].metric("Audited", stats["audited"])
+cols[4].metric("Needs attention", stats["needs_attention"])
 st.caption(f"{stats['awaiting']} awaiting backend connection | {stats['failed']} processing failures")
 
 with st.container(border=True):
     st.subheader("Invoice workspace")
-    st.caption("Find an invoice and open its report. All dates are shown in UTC.")
+    st.caption("Find an invoice, open its report, and review it. All dates are shown in UTC.")
     f1, f2, f3, f4 = st.columns([2.2, 1.3, 1.4, 1.2])
     query = f1.text_input("Search invoices", placeholder="Invoice number, filename, or vendor").strip()
     status = f2.selectbox("Processing status", list(STATUS_OPTIONS))
@@ -121,7 +122,9 @@ with st.container(border=True):
                     st.html('<p class="label">AUDIT RESULT</p>')
                     ui.audit_badge(doc["audit_result"])
                 with c5:
-                    st.button("View report", key=f"view_{doc['document_id']}", on_click=_open_report,
+                    needs_review = doc["processing_status"] == "review"
+                    st.button("Review report" if needs_review else "View report", key=f"view_{doc['document_id']}",
+                              type="primary" if needs_review else "secondary", on_click=_open_report,
                               args=(doc["document_id"],), use_container_width=True)
 
 

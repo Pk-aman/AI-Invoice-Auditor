@@ -44,19 +44,42 @@ class Settings(BaseSettings):
     reports_dir: Path = Path("/data/reports")
 
     # pipeline
-    ocr_langs: str = "eng+spa+deu+vie"
+    ocr_langs: str = "eng+spa+deu+fra+vie"  # Tesseract packs installed in the image (vie kept for the Vietnamese sample)
     min_chars_per_page: int = 30
     poll_interval_s: float = 5.0
     processing_concurrency: int = 1
     vendor_match_min_score: float = 0.5
     arith_tolerance: float = 0.01
 
+    # human-in-the-loop: at most this many reject_and_revalidate rounds; the next one auto-finalizes SKIPPED_MAX_RETRIES
+    max_human_checks: int = 3
+    reviewers_allowed: str = ""  # optional comma-separated allow-list; empty = any valid reviewer name
+    review_lock_timeout_s: float = 300.0
+
     # RAG
     rag_reflection: str = "on"  # on | off
+    rag_cache_ttl_s: int = 3600
+    ragas_min_context_relevance: float = 0.7
+    ragas_min_faithfulness: float = 0.7
+    ragas_min_answer_relevance: float = 0.7
+    # How ragas asks the judge LLM for structured output. MD_JSON (JSON in a markdown block) works with every model; the
+    # default tool-calling mode made llama3.2 return stringified arrays (schema validation failures). See README.
+    ragas_instructor_mode: str = "MD_JSON"
+    ragas_timeout_s: int = 180
     rag_top_k: int = 12
     rag_max_context_tokens: int = 3000
     chunk_chars: int = 2000
     chunk_overlap_chars: int = 200
+
+    # LangFuse observability (optional; everything works with it disabled). Keys come from the environment only.
+    langfuse_enabled: bool = False
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = "https://cloud.langfuse.com"
+
+    @property
+    def reviewer_allow_list(self) -> set[str]:
+        return {r.strip().lower() for r in self.reviewers_allowed.split(",") if r.strip()}
 
     @property
     def reflection_enabled(self) -> bool:

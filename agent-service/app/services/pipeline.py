@@ -1,4 +1,6 @@
-"""Runs the invoice graph: folder monitor thread -> bounded worker pool; re-validation; singleton guard."""
+"""Runs the invoice graph: folder monitor thread -> bounded worker pool; resume/retry; singleton guard.
+
+A new invoice runs until the human-review interrupt; `ReviewService` resumes it (see services/review.py)."""
 from __future__ import annotations
 
 import logging
@@ -12,7 +14,8 @@ from app.agents.monitor import FolderWatcher, compute_checksum
 from app.core.context import AppContext
 from app.core.logging import correlation_id
 from app.extraction.extract import detect_type
-from app.graphs.invoice_graph import build_invoice_graph, build_revalidate_graph
+from app.core.observability import traced_span
+from app.graphs.invoice_graph import build_invoice_graph
 
 log = logging.getLogger(__name__)
 
@@ -23,7 +26,6 @@ class Pipeline:
     def __init__(self, ctx: AppContext):
         self.ctx = ctx
         self.invoice_graph = build_invoice_graph(ctx, ctx.checkpointer)
-        self.revalidate_graph = build_revalidate_graph(ctx, ctx.checkpointer)
         self.executor = ThreadPoolExecutor(max_workers=max(1, ctx.settings.processing_concurrency), thread_name_prefix="invoice")
         self.watcher: FolderWatcher | None = None
         self._lock_conn = None
@@ -31,22 +33,33 @@ class Pipeline:
         self._guard = threading.Lock()
 
     # ---- synchronous runs (also used by tests) --------------------------------------
+    @staticmethod
+    def config(invoice_id: str) -> dict:
+        # a review loop traverses ~9 nodes per round; the default recursion limit (25) is too small for 3 rounds
+        return {"configurable": {"thread_id": invoice_id}, "recursion_limit": 200}
+
     def process_path(self, path: Path, invoice_id: str | None = None) -> dict:
         iid = invoice_id or str(uuid.uuid4())
         token = correlation_id.set(iid)
         try:
-            return self.invoice_graph.invoke({"invoice_id": iid, "file_path": str(path), "validation_run": 1},
-                                             {"configurable": {"thread_id": iid}})
+            with traced_span("invoice_pipeline", invoice_id=iid, file=path.name):
+                return self.invoice_graph.invoke({"invoice_id": iid, "file_path": str(path), "validation_run": 1},
+                                                 self.config(iid))
         finally:
             correlation_id.reset(token)
 
-    def revalidate_sync(self, invoice_id: str, run: int) -> dict:
+    def retry_sync(self, invoice_id: str) -> dict:
+        """Resume a run that stopped on a failing node (checkpoint kept). Idempotent: completed nodes are not re-run."""
         token = correlation_id.set(invoice_id)
         try:
-            return self.revalidate_graph.invoke({"invoice_id": invoice_id, "validation_run": run},
-                                                {"configurable": {"thread_id": f"{invoice_id}:rv{run}"}})
+            with traced_span("invoice_retry", invoice_id=invoice_id):
+                return self.invoice_graph.invoke(None, self.config(invoice_id))
         finally:
             correlation_id.reset(token)
+
+    def pending_nodes(self, invoice_id: str) -> tuple[str, ...]:
+        """Nodes still to run for this thread ((), ('human_review',) when waiting for a reviewer, or a failed node)."""
+        return tuple(self.invoice_graph.get_state(self.config(invoice_id)).next)
 
     # ---- async submission -------------------------------------------------------------
     def submit_path(self, path: Path, invoice_id: str | None = None) -> str:
@@ -54,15 +67,13 @@ class Pipeline:
         self.executor.submit(self._safe, self.process_path, path, iid)
         return iid
 
-    def submit_revalidate(self, invoice_id: str) -> int:
+    def submit_retry(self, invoice_id: str) -> None:
         with self._guard:
             if invoice_id in self._inflight:
-                raise RuntimeError("re-validation already in progress for this invoice")
+                raise RuntimeError("this invoice is already being processed")
             self._inflight.add(invoice_id)
-        run = self.ctx.repo.next_validation_run(invoice_id)
-        fut: Future = self.executor.submit(self._safe, self.revalidate_sync, invoice_id, run)
+        fut: Future = self.executor.submit(self._safe, self.retry_sync, invoice_id)
         fut.add_done_callback(lambda _f: self._release(invoice_id))
-        return run
 
     def _release(self, invoice_id: str) -> None:
         with self._guard:
@@ -72,8 +83,8 @@ class Pipeline:
     def _safe(fn, *args):
         try:
             return fn(*args)
-        except Exception:  # noqa: BLE001 - background failures must be logged, not lost
-            log.exception("background pipeline run crashed")
+        except Exception:  # noqa: BLE001 - background failures must be logged, not lost (the checkpoint keeps the state)
+            log.exception("background pipeline run stopped; resumable with POST /invoices/{id}/retry")
 
     def precheck(self, path: Path) -> tuple[str, str | None]:
         """('duplicate', existing_id) | ('queued', None) — used by POST /invoices/process."""

@@ -77,11 +77,13 @@ def _atomic_write(path: Path, content: str) -> None:
 
 
 def write_report_files(reports_dir: Path, invoice_id: str, report: dict, run: int) -> str:
-    """Write {id}.json/.html (latest) and {id}.run{n}.json (archive). Returns the HTML file name (stored in the DB)."""
+    """Write {id}.json/.html (latest) and {id}.run{n}.json/.html (archive). Returns the HTML file name (stored in the DB)."""
     reports_dir.mkdir(parents=True, exist_ok=True)
     html = _env.get_template("report.html.j2").render(r=_AttrDict(report))
     payload = json.dumps(report, indent=2, ensure_ascii=False)
+    # per-run archives are never overwritten (run 1 is the immutable original AI report); {id}.json/.html = latest run
     _atomic_write(reports_dir / f"{invoice_id}.run{run}.json", payload)
+    _atomic_write(reports_dir / f"{invoice_id}.run{run}.html", html)
     _atomic_write(reports_dir / f"{invoice_id}.json", payload)
     _atomic_write(reports_dir / f"{invoice_id}.html", html)
     return f"{invoice_id}.html"

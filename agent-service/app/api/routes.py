@@ -9,7 +9,18 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from app.api.schemas import ProcessRequest, ProcessResponse, RagAnswer, RagEvaluation, RagQuery, RevalidateResponse, StatusResponse
+from app.agents.review import ReviewError
+from app.api.schemas import (
+    ProcessRequest,
+    ProcessResponse,
+    RagAnswer,
+    RagEvaluation,
+    RagQuery,
+    ReviewRequest,
+    ReviewResponse,
+    ReviewState,
+    StatusResponse,
+)
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -29,20 +40,32 @@ def _valid_uuid(value: str) -> str:
         raise HTTPException(status_code=422, detail="invalid invoice id") from None
 
 
+def _probe_status(st) -> dict:
+    now = time.monotonic()
+    if now - _READY_CACHE["at"] > _READY_TTL_S or _READY_CACHE["status"] is None:
+        _READY_CACHE.update(at=now, status=st.probe(st.ctx.settings))
+    return _READY_CACHE["status"]
+
+
 @router.get("/health", tags=["health"])
-def health() -> dict:
-    """Liveness: the process is up."""
-    return {"status": "ok"}
+def health(request: Request):
+    """Dependency health. 200 only when PostgreSQL, Qdrant, Redis and the mock ERP are all usable, else 503:
+    {"status": "healthy", "dependencies": {"postgres": "connected", "qdrant": "connected", "redis": "connected", "mock_erp": "reachable"}}"""
+    status = _probe_status(_state(request))
+    deps = {
+        "postgres": "connected" if status.get("postgres") is None else f"unreachable: {status['postgres']}",
+        "qdrant": "connected" if status.get("qdrant") is None else f"unreachable: {status['qdrant']}",
+        "redis": "connected" if status.get("redis") is None else f"unreachable: {status['redis']}",
+        "mock_erp": "reachable" if status.get("erp") is None else f"unreachable: {status['erp']}",
+    }
+    ok = status.get("postgres") is None and status.get("qdrant") is None and status.get("redis") is None and status.get("erp") is None
+    return JSONResponse({"status": "healthy" if ok else "unhealthy", "dependencies": deps}, status_code=200 if ok else 503)
 
 
 @router.get("/ready", tags=["health"])
 def ready(request: Request):
-    """Readiness: every dependency (PostgreSQL, Redis, Qdrant, ERP, LLM config) is usable."""
-    st = _state(request)
-    now = time.monotonic()
-    if now - _READY_CACHE["at"] > _READY_TTL_S or _READY_CACHE["status"] is None:
-        _READY_CACHE.update(at=now, status=st.probe(st.ctx.settings))
-    status = _READY_CACHE["status"]
+    """Readiness (used by the Docker healthcheck): `/health` dependencies PLUS the LLM configuration."""
+    status = _probe_status(_state(request))
     ok = not any(status.values())
     body = {"ready": ok, "dependencies": {k: ("ok" if v is None else v) for k, v in status.items()}}
     return JSONResponse(body, status_code=200 if ok else 503)
@@ -78,17 +101,36 @@ def status(invoice_id: str, request: Request):
                           events=[{"stage": e["stage"], "state": e["state"], "at": e["created_at"].isoformat()} for e in events])
 
 
-@router.post("/invoices/{invoice_id}/revalidate", response_model=RevalidateResponse, status_code=202, tags=["invoices"])
-def revalidate(invoice_id: str, request: Request):
-    iid = _valid_uuid(invoice_id)
-    st = _state(request)
-    if st.ctx.repo.get_invoice(iid) is None:
-        raise HTTPException(status_code=404, detail="invoice not found")
+def _review_error(exc: ReviewError) -> HTTPException:
+    return HTTPException(status_code=exc.status, detail={"code": exc.code, "message": exc.message})
+
+
+@router.get("/invoices/{invoice_id}/review", response_model=ReviewState, tags=["review"])
+def review_state(invoice_id: str, request: Request):
+    """Current review state: live from the workflow checkpoint while pending, from PostgreSQL once finalized."""
     try:
-        run = st.pipeline.submit_revalidate(iid)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return RevalidateResponse(invoice_id=iid, validation_run=run)
+        return _state(request).review.state(_valid_uuid(invoice_id))
+    except ReviewError as exc:
+        raise _review_error(exc) from exc
+
+
+@router.post("/invoices/{invoice_id}/review", response_model=ReviewResponse, tags=["review"])
+def review(invoice_id: str, body: ReviewRequest, request: Request):
+    """Submit the human decision: approve | reject | reject_and_revalidate (with field corrections)."""
+    try:
+        return _state(request).review.review(_valid_uuid(invoice_id), body)
+    except ReviewError as exc:
+        raise _review_error(exc) from exc
+
+
+@router.post("/invoices/{invoice_id}/retry", status_code=202, tags=["review"])
+def retry(invoice_id: str, request: Request):
+    """Resume a run that stopped on a failing step (checkpoint kept; completed steps are not repeated)."""
+    try:
+        _state(request).review.retry(_valid_uuid(invoice_id))
+    except ReviewError as exc:
+        raise _review_error(exc) from exc
+    return {"status": "queued", "invoice_id": invoice_id}
 
 
 @router.post("/rag/query", response_model=RagAnswer, tags=["rag"])

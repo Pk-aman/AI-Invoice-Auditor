@@ -1,4 +1,7 @@
-"""Indexing agent: chunk stored text + report, embed, upsert into Qdrant (idempotent, deterministic ids)."""
+"""Indexing agent: chunk stored text + report, embed, upsert into Qdrant (idempotent, deterministic ids).
+
+Payload `source_type`: `invoice_text` (translated invoice body) | `ai_report` (the AI audit report chunks).
+"""
 from __future__ import annotations
 
 import logging
@@ -14,6 +17,8 @@ log = logging.getLogger(__name__)
 
 _NS = uuid.UUID("6f1d0b0e-5a0e-4c53-9c7e-3d2b7a1f9a10")
 EMBED_BATCH = 16
+SOURCE_INVOICE = "invoice_text"
+SOURCE_REPORT = "ai_report"
 
 
 def point_id(invoice_id: str, source_type: str, chunk_no: int) -> str:
@@ -80,10 +85,10 @@ def index_invoice(client: QdrantClient, collection: str, llm: LLM, *, invoice_id
     base = {"invoice_id": invoice_id, "vendor": vendor or "", "language": language or "", "invoice_number": invoice_number or ""}
     total = 0
     if include_invoice_text:
-        total += _upsert(client, collection, llm, invoice_id, "invoice", chunk_text(text, chunk_chars, overlap), base)
+        total += _upsert(client, collection, llm, invoice_id, SOURCE_INVOICE, chunk_text(text, chunk_chars, overlap), base)
     if report:
         # replace the report chunks wholesale (the number of chunks changes between validation runs)
-        delete_points(client, collection, invoice_id, "report")
-        total += _upsert(client, collection, llm, invoice_id, "report", report_chunks(report), base)
+        delete_points(client, collection, invoice_id, SOURCE_REPORT)
+        total += _upsert(client, collection, llm, invoice_id, SOURCE_REPORT, report_chunks(report), base)
     log.info("indexed invoice", extra={"invoice_id": invoice_id, "points": total})
     return total

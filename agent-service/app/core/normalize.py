@@ -1,6 +1,7 @@
 """Pure normalisation helpers: amounts, dates, currency, text."""
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -105,3 +106,13 @@ def jsonable(obj):
     if isinstance(obj, (list, tuple)):
         return [jsonable(v) for v in obj]
     return obj
+
+
+def normalize_content(translated_text: str) -> str:
+    """Canonical form used for content de-duplication (must stay identical to infra/postgres/migrate.py)."""
+    return " ".join(translated_text.lower().split())
+
+
+def content_checksum(translated_text: str) -> str:
+    """SHA-256 of the normalised (lower-cased, whitespace-collapsed) English text."""
+    return hashlib.sha256(normalize_content(translated_text).encode("utf-8")).hexdigest()

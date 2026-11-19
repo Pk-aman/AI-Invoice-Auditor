@@ -113,6 +113,23 @@ services:
       auditor-net:
         aliases: [streamlit-ui]
 
+  # One-shot schema migration for an EXISTING database (not part of the six services; never started by `up`).
+  #   docker compose --profile migrate run --rm db-migrate
+  # Fresh installs do not need it: infra/postgres/init/*.sql already create the final schema.
+  db-migrate:
+    profiles: ["migrate"]
+    image: ai-auditor/agent-service:1.0.0       # reuses the agent image (psycopg is already in it)
+    env_file: .env                              # admin POSTGRES_* credentials: only this job gets them
+    environment:
+      POSTGRES_HOST: postgres
+    command: ["python", "/migrations/migrate.py"]
+    volumes:
+      - ./infra/postgres:/migrations:ro
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: "no"
+    networks: [auditor-net]
+
 networks:
   auditor-net:
     driver: bridge

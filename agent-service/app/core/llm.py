@@ -9,9 +9,11 @@ import hashlib
 import json
 import logging
 import re
+import time
 from typing import Protocol
 
 from app.core.config import Settings
+from app.core.observability import get_tracer
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +53,7 @@ class LiteLLMClient:
         import litellm
 
         model = self.model_for(role)
+        started = time.perf_counter()
         try:
             resp = litellm.completion(
                 model=model,
@@ -62,7 +65,14 @@ class LiteLLMClient:
                 **self._extra(model),
             )
         except Exception as exc:  # noqa: BLE001 - surface any provider failure uniformly
+            get_tracer().generation(name=f"llm.{role}", model=model, latency_s=time.perf_counter() - started,
+                                    error=type(exc).__name__, role=role)
             raise LLMError(f"LLM call failed ({model}): {type(exc).__name__}: {exc}") from exc
+        usage = getattr(resp, "usage", None)
+        get_tracer().generation(
+            name=f"llm.{role}", model=model, latency_s=time.perf_counter() - started, role=role,
+            usage={"input": int(getattr(usage, "prompt_tokens", 0) or 0), "output": int(getattr(usage, "completion_tokens", 0) or 0)}
+            if usage else None, prompt_chars=len(system) + len(user))  # sizes only: prompt/completion text is never traced
         content = resp.choices[0].message.content
         if not content:
             raise LLMError(f"LLM returned empty content ({model})")
@@ -73,12 +83,16 @@ class LiteLLMClient:
 
         out: list[list[float]] = []
         model = self.s.embedding_model
+        started = time.perf_counter()
         for t in texts:  # Titan embeds one input per request
             try:
                 resp = litellm.embedding(model=model, input=[t], timeout=self.s.llm_timeout_s, **self._extra(model))
             except Exception as exc:  # noqa: BLE001
+                get_tracer().generation(name="llm.embedding", model=model, latency_s=time.perf_counter() - started,
+                                        error=type(exc).__name__)
                 raise LLMError(f"embedding call failed ({model}): {type(exc).__name__}: {exc}") from exc
             out.append(list(resp.data[0]["embedding"]))
+        get_tracer().generation(name="llm.embedding", model=model, latency_s=time.perf_counter() - started, inputs=len(texts))
         return out
 
 

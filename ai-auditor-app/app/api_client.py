@@ -22,8 +22,11 @@ def _message(resp: requests.Response) -> str:
         err = body.get("error") if isinstance(body, dict) else None
         if isinstance(err, dict) and err.get("message"):
             return err["message"]
-        if isinstance(body, dict) and body.get("detail"):
-            return str(body["detail"])
+        detail = body.get("detail") if isinstance(body, dict) else None
+        if isinstance(detail, dict) and detail.get("message"):  # agent review errors: {"code", "message"}
+            return str(detail["message"])
+        if detail:
+            return str(detail)
     except ValueError:
         pass
     return f"The service returned an error ({resp.status_code})."
@@ -69,3 +72,25 @@ def ask(question: str, session_id: str, invoice_id: str | None = None) -> dict:
     if invoice_id:
         body["invoice_id"] = invoice_id
     return _request("POST", f"{AGENT_URL}/rag/query", json=body, timeout=(3, 240)).json()
+
+
+def review_state(invoice_id: str) -> dict:
+    """Live review state (checkpoint while pending, PostgreSQL once finalized)."""
+    return _request("GET", f"{AGENT_URL}/invoices/{invoice_id}/review", timeout=(3, 30)).json()
+
+
+def submit_review(invoice_id: str, body: dict) -> dict:
+    """Approve / reject / reject_and_revalidate. Re-validation calls the LLM, so allow time."""
+    return _request("POST", f"{AGENT_URL}/invoices/{invoice_id}/review", json=body, timeout=(3, 300)).json()
+
+
+def retry_invoice(invoice_id: str) -> dict:
+    return _request("POST", f"{AGENT_URL}/invoices/{invoice_id}/retry", timeout=(3, 30)).json()
+
+
+def review_history(invoice_id: str) -> list[dict]:
+    return _request("GET", f"{SERVICES_URL}/api/v1/invoices/{invoice_id}/reviews").json()
+
+
+def evaluation(eval_id: str) -> dict:
+    return _request("GET", f"{AGENT_URL}/rag/evaluations/{eval_id}").json()
