@@ -62,6 +62,7 @@ class LiteLLMClient:
                 timeout=self.s.llm_timeout_s,
                 num_retries=2,
                 max_tokens=max_tokens or 2048,
+                **({"response_format": {"type": "json_object"}} if json_mode and model.startswith("ollama") else {}),
                 **self._extra(model),
             )
         except Exception as exc:  # noqa: BLE001 - surface any provider failure uniformly

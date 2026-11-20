@@ -8,7 +8,8 @@ ui.apply_theme()
 dashboard = st.Page("pages/dashboard.py", title="Dashboard", icon=":material/dashboard:", default=True)
 upload = st.Page("pages/upload.py", title="Upload Invoice", icon=":material/upload_file:", url_path="upload")
 assistant = st.Page("pages/assistant.py", title="Invoice Assistant", icon=":material/chat:", url_path="assistant")
-nav = st.navigation([dashboard, upload, assistant], position="hidden")
+erp = st.Page("pages/erp.py", title="ERP Data", icon=":material/database:", url_path="erp")
+nav = st.navigation([dashboard, upload, assistant, erp], position="hidden")
 
 try:
     total = api_client.document_stats()["total"]
@@ -22,6 +23,7 @@ with st.sidebar:
     st.page_link(dashboard, label="Dashboard", icon=":material/dashboard:")
     st.page_link(upload, label="Upload Invoice", icon=":material/upload_file:")
     st.page_link(assistant, label="Invoice Assistant", icon=":material/chat:")
+    st.page_link(erp, label="ERP Data", icon=":material/database:")
     st.divider()
     if connected:
         st.markdown(f"**{total}** invoice(s) in workspace")

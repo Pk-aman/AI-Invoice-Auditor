@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -112,6 +113,15 @@ def _render_page(page, dpi: int = 300):
     return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
 
 
+_TI_LIGATURE = re.compile(r"(?<=[a-z])\+(?=[a-z])")
+
+
+def fix_ligatures(text: str) -> str:
+    """Some PDF fonts export the 'ti' ligature as '+' ('Logis+k', 'Ar+kelcode'). A '+' between two lowercase
+    letters is never legitimate in an invoice, so restore it."""
+    return _TI_LIGATURE.sub("ti", text)
+
+
 def extract_pdf(path: Path, langs: str, min_chars: int = 30) -> ExtractionResult:
     """Direct-first: PyMuPDF text layer per page; pages with too little text are rendered and OCR'd individually.
 
@@ -130,7 +140,7 @@ def extract_pdf(path: Path, langs: str, min_chars: int = 30) -> ExtractionResult
         if doc.needs_pass:
             raise ExtractionError("cannot read PDF: it is password-protected")
         for number, page in enumerate(doc, start=1):
-            text = (page.get_text("text") or "").strip()
+            text = fix_ligatures((page.get_text("text") or "").strip())
             if len(text) < min_chars:
                 if not tesseract_available():
                     raise ExtractionError(f"page {number} has no text layer and Tesseract is not installed")

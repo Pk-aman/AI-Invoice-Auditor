@@ -4,7 +4,7 @@ from sqlalchemy import Connection
 from app.core.db import get_conn
 from app.core.errors import AppError
 from app.repositories import erp_repo
-from app.schemas.erp import PurchaseOrder, Sku, Vendor, VendorMatch
+from app.schemas.erp import ErpOverview, PurchaseOrder, Sku, Vendor, VendorMatch
 
 router = APIRouter(tags=["erp"])
 
@@ -42,3 +42,8 @@ def search_vendors(name: str = Query(min_length=1, max_length=255), limit: int =
 @router.get("/api/v1/erp/pos", response_model=list[PurchaseOrder])
 def list_pos(vendor_id: str, conn: Connection = Depends(get_conn)):
     return erp_repo.list_pos_for_vendor(conn, vendor_id)
+
+
+@router.get("/api/v1/erp/overview", response_model=ErpOverview)
+def erp_overview(conn: Connection = Depends(get_conn)):
+    return erp_repo.overview(conn)

@@ -90,6 +90,8 @@ _ROW_FULL = re.compile(  # "1 Desktop furniture 1 $ 232.00 $ 232.00"
     r"^\s*(\d{1,3})\s+(.+?)\s+(\d+(?:[.,]\d+)?)\s+[$€£₹]?\s*([\d.,]+)\s+[$€£₹]?\s*([\d.,]+)\s*$")
 _ROW_NUMS = re.compile(  # "1.00 $85.00 0.00% $85.00" (description sits on the line above)
     r"^\s*(\d+(?:[.,]\d+)?)\s+[$€£₹]?\s*([\d.,]+)(?:\s+[\d.,]+\s*%)?\s+[$€£₹]?\s*([\d.,]+)\s*$")
+_ROW_PIPE = re.compile(  # "SKU-301 | Transportkisten | 40 | 25.00€| 1000.00€"  (code | description | qty | price | total)
+    r"^\s*([A-Za-z0-9][\w\-/.]*)\s*\|\s*(.+?)\s*\|\s*(\d+(?:[.,]\d+)?)\s*\|\s*[$€£₹]?\s*([\d.,]+)\s*[$€£₹A-Z]{0,3}\s*\|\s*[$€£₹]?\s*([\d.,]+)\s*[$€£₹A-Z]{0,3}\s*$")
 _MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
 
 
@@ -108,7 +110,12 @@ def _line_items(text: str) -> list[LineItem]:
     lines = [ln.strip() for ln in text.splitlines()]
     items: list[LineItem] = []
     for i, ln in enumerate(lines):
-        if m := _ROW_FULL.match(ln):
+        if m := _ROW_PIPE.match(ln):
+            qty, rate, amt = parse_amount(m.group(3)), parse_amount(m.group(4)), parse_amount(m.group(5))
+            if None not in (qty, rate, amt):
+                items.append(LineItem(line_number=len(items) + 1, item_code=m.group(1), description=m.group(2).strip(),
+                                      quantity=qty, unit_price=rate, line_total=amt))
+        elif m := _ROW_FULL.match(ln):
             qty, rate, amt = parse_amount(m.group(3)), parse_amount(m.group(4)), parse_amount(m.group(5))
             if None in (qty, rate, amt):
                 continue
@@ -184,21 +191,26 @@ def _ground(inv: ExtractedInvoice, text: str, rules: Rules) -> ExtractedInvoice:
     return inv
 
 
+_STRICT_JSON = "Reply with ONLY one valid JSON object. No explanation, no markdown, no text before or after it. "
+
+
 def parse_invoice(translated_text: str, llm: LLM, rules: Rules, *, raw_text: str | None = None) -> ExtractedInvoice:
     cfg = prompts.load("parser")["extract"]
     system = prompts.persona() + "\n\n" + cfg["system"]
     user = prompts.render(cfg["user"], text=translated_text[:12000])
     data: dict | None = None
-    for attempt in (1, 2):
+    for attempt in (1, 2, 3):
+        # a retry must not replay a cached bad reply: later attempts use a different (stricter) prompt
+        prompt = user if attempt == 1 else user + "\n\n" + _STRICT_JSON * (attempt - 1)
         try:
-            data = extract_json(llm.complete("reasoning", system, user, json_mode=True, max_tokens=3000))
+            data = extract_json(llm.complete("reasoning", system, prompt, json_mode=True, max_tokens=3000))
             break
         except LLMError as exc:
             log.warning("parser attempt failed", extra={"attempt": attempt, "error": str(exc)})
             last_error = exc
     if data is None:
         # No usable model output: continue with deterministic regex extraction only (partial data is flagged downstream)
-        log.error("parser LLM failed twice; using regex fallbacks only", extra={"error": str(last_error)})
+        log.error("parser LLM failed 3 times; using regex fallbacks only", extra={"error": str(last_error)})
         data = {}
     inv = build_invoice(data, rules)
     if not data:

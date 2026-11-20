@@ -61,6 +61,10 @@ def get_original(document_id: str) -> bytes:
     return _request("GET", f"{SERVICES_URL}/api/v1/documents/{document_id}/file", timeout=(3, 30)).content
 
 
+def erp_overview() -> dict:
+    return _request("GET", f"{SERVICES_URL}/api/v1/erp/overview", timeout=(3, 30)).json()
+
+
 def upload(files: list[tuple[str, bytes, str]]) -> list[dict]:
     payload = [("files", (name, data, mime)) for name, data, mime in files]
     return _request("POST", f"{SERVICES_URL}/api/v1/uploads", files=payload, timeout=(3, 120)).json()

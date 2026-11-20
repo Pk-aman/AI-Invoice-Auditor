@@ -101,14 +101,6 @@ def _render(message: dict, *, latest: bool = False) -> None:
             return
         if message.get("cache_hit"):
             st.caption(":material/bolt: Answered from a recent saved response.")
-        if message.get("sources"):
-            with st.expander("Sources"):
-                for src in message["sources"]:
-                    label = {"ai_report": "Audit report", "invoice_text": "Invoice text", "database": "Database"}.get(
-                        src.get("source_type"), src.get("source_type", ""))
-                    st.caption(f"{src.get('invoice_number') or src.get('invoice_id') or 'All invoices'} · {label}")
-                    if src.get("chunk_text"):
-                        st.write(src["chunk_text"][:600])
         if message.get("ragas_metrics") and message["ragas_metrics"].get("state") not in (None, "not_applicable", "disabled"):
             if latest and message["ragas_metrics"].get("state") == "pending":
                 _poll_metrics(message)

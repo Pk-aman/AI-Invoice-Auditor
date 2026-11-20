@@ -11,6 +11,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
 from app.agents.rag import setup
@@ -286,11 +287,13 @@ ALL_INVOICE_QUERIES = {
             vendor_name,
             total_amount,
             currency,
+            recommendation AS ai_recommendation,
+            status AS final_decision,
             processed_at
 
         FROM audit.invoice_audit
 
-        WHERE recommendation = 'reject'
+        WHERE status = 'REJECTED'
 
         ORDER BY processed_at DESC
         LIMIT 50
@@ -302,11 +305,13 @@ ALL_INVOICE_QUERIES = {
             vendor_name,
             total_amount,
             currency,
+            recommendation AS ai_recommendation,
+            status AS final_decision,
             processed_at
 
         FROM audit.invoice_audit
 
-        WHERE recommendation = 'approve'
+        WHERE status = 'APPROVED'
 
         ORDER BY processed_at DESC
         LIMIT 50
@@ -407,27 +412,71 @@ def sql_node(state: RAGState):
             "sources": []
         }
 
-    # Execute approved parameterized query and return the rows.
+    # Execute approved parameterized query, then explain the rows in plain language.
 
-    answer = json.dumps(
-        rows,
-        default=str,
-        indent=4
-    )
-
-    # Shown as a code block in the UI.
-
-    answer = f"```json\n{answer}\n```"
+    rows_json = json.dumps(rows, default=str, indent=2)
 
     return {
-        "answer": answer,
+        "answer": narrate(state["question"], action, rows, rows_json),
         "sources": [
             {
                 "ref": "DB",
                 "source_type": "database",
-                "chunk_text": answer,
+                "chunk_text": rows_json,
                 "sql_action": action,
                 "rows": len(rows)
             }
         ]
     }
+
+
+# ================================================================
+# NATURAL-LANGUAGE ANSWER FOR SQL RESULTS
+# ================================================================
+
+NO_ROWS_ANSWER = {
+    "approved_invoices": "There are no approved invoices yet.",
+    "rejected_invoices": "There are no rejected invoices.",
+    "invoices_needing_attention": "No invoices currently need attention.",
+}
+
+
+def _plain(row: dict) -> str:
+
+    return ", ".join(f"{k.replace('_', ' ')}: {v}" for k, v in row.items() if v is not None)
+
+
+def fallback_answer(rows: list) -> str:
+
+    """Used when the LLM is unavailable: still plain text, never raw JSON."""
+
+    lines = [f"- {_plain(row)}" for row in rows]
+
+    return f"I found {len(rows)} result(s):\n" + "\n".join(lines)
+
+
+def narrate(question, action, rows, rows_json):
+
+    if not rows:
+        return NO_ROWS_ANSWER.get(action, "I found no matching records.")
+
+    try:
+
+        prompt = ChatPromptTemplate.from_messages([
+            ("system",
+             "You are an AI Invoice Auditor assistant. Answer the question in clear, friendly natural "
+             "language using ONLY the database rows provided. Mention the key values (invoice numbers, "
+             "vendors, amounts with currency, counts). Use a short bullet list when there are several "
+             "invoices. Do not output JSON or code blocks and do not invent values."),
+            ("human", "Question: {question}\n\nDatabase rows (JSON):\n{rows}"),
+        ])
+
+        text = (prompt | setup.llm | StrOutputParser()).invoke({"question": question, "rows": rows_json})
+
+        return text.strip() or fallback_answer(rows)
+
+    except Exception:
+
+        log.warning("could not summarise SQL result; using plain fallback", exc_info=True)
+
+        return fallback_answer(rows)

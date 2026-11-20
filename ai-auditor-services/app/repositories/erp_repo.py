@@ -80,3 +80,29 @@ def search_vendors(conn: Connection, name: str, limit: int = 5, min_score: float
     scored = [s for s in scored if s["score"] >= min_score]
     scored.sort(key=lambda s: s["score"], reverse=True)
     return scored[:limit]
+
+
+def overview(conn: Connection) -> dict:
+    """Read-only snapshot of the whole ERP master data, for the UI's ERP viewer."""
+    vendors = conn.execute(
+        text("SELECT vendor_id, vendor_name, country, currency FROM erp.vendors ORDER BY vendor_id")
+    ).mappings().all()
+    skus = conn.execute(
+        text("SELECT item_code, category, uom, gst_rate FROM erp.sku_master ORDER BY item_code")
+    ).mappings().all()
+    heads = conn.execute(
+        text("SELECT po_number, vendor_id FROM erp.purchase_orders ORDER BY po_number")
+    ).mappings().all()
+    lines = conn.execute(
+        text("SELECT po_number, line_number, item_code, description, qty, unit_price, currency "
+             "FROM erp.po_line_items ORDER BY po_number, line_number")
+    ).mappings().all()
+    by_po: dict[str, list] = {}
+    for ln in lines:
+        d = dict(ln)
+        by_po.setdefault(d.pop("po_number"), []).append(d)
+    return {
+        "vendors": [dict(v) for v in vendors],
+        "skus": [dict(s) for s in skus],
+        "purchase_orders": [{**dict(h), "line_items": by_po.get(h["po_number"], [])} for h in heads],
+    }

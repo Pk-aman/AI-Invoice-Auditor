@@ -32,3 +32,9 @@ class Sku(BaseModel):
     category: str | None = None
     uom: str | None = None
     gst_rate: float | None = None
+
+
+class ErpOverview(BaseModel):
+    vendors: list[Vendor]
+    skus: list[Sku]
+    purchase_orders: list[PurchaseOrder]
